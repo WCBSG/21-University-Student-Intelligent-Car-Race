@@ -1,0 +1,27 @@
+{
+  "python.analysis.stubPath": "./.stubs2.2.0",
+  "python.autoComplete.extraPaths": [
+    "./.stubs2.2.0",
+    "./.stubs2.2.0/machine",
+    "./.stubs2.2.0/seekfree",
+    "./.stubs2.2.0/smartcar",
+    "./.stubs2.2.0/display",
+    "./.stubs2.2.0/time",
+    "./.stubs2.2.0/os"
+  ],
+  "python.analysis.extraPaths": [
+    "./.stubs2.2.0",
+    "./.stubs2.2.0/machine",
+    "./.stubs2.2.0/seekfree",
+    "./.stubs2.2.0/smartcar",
+    "./.stubs2.2.0/display",
+    "./.stubs2.2.0/time",
+    "./.stubs2.2.0/os"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingModuleSource": "none",
+    "reportUnusedImport": "none",
+    "reportMissingImports": "none"
+  }
+}

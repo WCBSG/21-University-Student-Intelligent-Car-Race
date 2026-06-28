@@ -1,0 +1,12 @@
+Model/data/
+Model/data2500/
+Model/yolo3_smartcar/__pycache__
+Model/yolo3_smartcar/logs
+Model/yolo3_smartcar/map_out
+Model/yolo3_smartcar/eva_data.txt
+Model/yolo3_smartcar/yolo3_anchors.txt
+Model/yolo3_smartcar/train_data.txt
+Model/yolo3_smartcar/add_post_processing_32.dll
+Model/yolo3_smartcar/add_post_processing_64.dll
+Model/yolo3_smartcar/add_post_processing_64.so
+
