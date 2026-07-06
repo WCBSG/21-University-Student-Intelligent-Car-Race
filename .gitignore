@@ -9,4 +9,4 @@ Model/yolo3_smartcar/train_data.txt
 Model/yolo3_smartcar/add_post_processing_32.dll
 Model/yolo3_smartcar/add_post_processing_64.dll
 Model/yolo3_smartcar/add_post_processing_64.so
-
+Model/view_output

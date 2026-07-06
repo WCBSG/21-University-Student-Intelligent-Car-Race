@@ -247,15 +247,13 @@ class Menu:
     # —— 编辑模式 ——————————————————————————————————————
     if self.edit_mode:
       if key == 'UP':
-        self.edit_temp_val = min(
-          self.edit_item.max_val,
-          self.edit_temp_val + self.edit_item.step
-        )
+        self.edit_temp_val += self.edit_item.step
+        if self.edit_temp_val > self.edit_item.max_val:
+          self.edit_temp_val = self.edit_item.min_val
       elif key == 'DOWN':
-        self.edit_temp_val = max(
-          self.edit_item.min_val,
-          self.edit_temp_val - self.edit_item.step
-        )
+        self.edit_temp_val -= self.edit_item.step
+        if self.edit_temp_val < self.edit_item.min_val:
+          self.edit_temp_val = self.edit_item.max_val
       elif key == 'ENTER':
         self.edit_item.set_value(self.edit_temp_val)
         if self.edit_item.persistent:
@@ -378,6 +376,8 @@ PAGE_IMU         = 1
 PAGE_ABOUT       = 2
 PAGE_HEADING     = 3
 PAGE_HEADING_PID = 4
+PAGE_TRACKER     = 5
+PAGE_TRACKER_PID = 6
 
 
 # =============================================================================
@@ -401,6 +401,7 @@ def _make_main_page():
     items=[
       MenuItem("IMU",     action=_make_go_action(PAGE_IMU, 0)),
       MenuItem("Heading", action=_make_go_action(PAGE_HEADING, 0)),
+      MenuItem("Tracker >", action=_make_go_action(PAGE_TRACKER, 0)),
       MenuItem("About",   action=_make_go_action(PAGE_ABOUT, 0)),
     ],
   )
@@ -576,11 +577,134 @@ def _make_heading_pid_page(hdg):
   )
 
 
+def _make_tracker_page(tracker, camera):
+  """视觉跟踪主页面"""
+  CLASS_NAMES = {7: "Any", 0: "Sandbag", 1: "Netball", 2: "Bear"}
+
+  def _get_status():
+    if camera is None:
+      return "Camera: N/A"
+    if hasattr(camera, 'failed') and camera.failed:
+      return "Camera: Self-Test FAILED"
+    if not camera.is_ready():
+      return "Camera: Disconnected"
+    dets = camera.get_detections()
+    n = len(dets)
+    st = tracker.state if tracker else 'IDLE'
+    if st == 'IDLE':
+      return "Idle | {} targets".format(n)
+    elif st == 'SEARCHING':
+      return "Searching... | {} targets".format(n)
+    elif st == 'TRACKING':
+      info = tracker.target_info if tracker.target_info else "--"
+      return "TRACK | {} | {} targets".format(info, n)
+    elif st == 'COMPLETE':
+      return "COMPLETE [BACK to return]"
+    return st
+
+  def _get_tgt_cls():  return config["trk_target_class"]
+  def _set_tgt_cls(v): config["trk_target_class"] = int(v)
+  def _fmt_cls(v):
+    return CLASS_NAMES.get(int(v), str(int(v)))
+
+  def _get_min_conf():  return config["trk_min_confidence"]
+  def _set_min_conf(v): config["trk_min_confidence"] = int(v)
+
+  def _get_app_spd():  return config["trk_approach_speed"]
+  def _set_app_spd(v): config["trk_approach_speed"] = v
+  def _get_srch_spd(): return config["trk_search_speed"]
+  def _set_srch_spd(v): config["trk_search_speed"] = v
+  def _get_stop_pct(): return config["trk_stop_bottom_pct"]
+  def _set_stop_pct(v): config["trk_stop_bottom_pct"] = v
+  def _get_rev_ang():  return config["trk_reverse_angle"]
+  def _set_rev_ang(v): config["trk_reverse_angle"] = v
+
+  def _action_start(m, i):
+    if tracker:
+      if not tracker.start():
+        pass  # IMU 未校准，start() 内部静默失败
+
+  def _action_stop(m, i):
+    if tracker:
+      tracker.stop()
+
+  def _action_reconnect(m, i):
+    if camera:
+      camera.handshake(retries=50, retry_ms=100)
+
+  return MenuPage(
+    id=PAGE_TRACKER, name="Object Tracker",
+    items=[
+      MenuItem("Status", get_value=_get_status),
+      MenuItem("Start Track", action=_action_start),
+      MenuItem("Stop", action=_action_stop),
+      MenuItem("Reconnect", action=_action_reconnect),
+      AdjustItem("Class:", _get_tgt_cls, _set_tgt_cls,
+                 0, 7, 1, persistent=True, formatter=_fmt_cls),
+      AdjustItem("Confidence:", _get_min_conf, _set_min_conf,
+                 0, 31, 1, persistent=True,
+                 formatter=lambda v: "{:.0f}/31".format(v)),
+      AdjustItem("ApproachSpd:", _get_app_spd, _set_app_spd,
+                 5.0, 100.0, 5.0, persistent=True,
+                 formatter=lambda v: "{:.0f}%".format(v)),
+      AdjustItem("SearchSpd:", _get_srch_spd, _set_srch_spd,
+                 5.0, 50.0, 5.0, persistent=True,
+                 formatter=lambda v: "{:.0f}%".format(v)),
+      AdjustItem("StopBottom:", _get_stop_pct, _set_stop_pct,
+                 70.0, 99.0, 1.0, persistent=True,
+                 formatter=lambda v: "{:.0f}%".format(v)),
+      AdjustItem("RevAngle:", _get_rev_ang, _set_rev_ang,
+                 10.0, 90.0, 5.0, persistent=True,
+                 formatter=lambda v: "{:.0f} deg".format(v)),
+      MenuItem("PID Tune >", action=_make_go_action(PAGE_TRACKER_PID, 0)),
+      MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 2)),
+    ],
+    refresh_ms=200,
+  )
+
+
+def _make_tracker_pid_page(tracker):
+  """视觉跟踪 PID 调参页"""
+  def _get_kp():  return config["trk_bearing_kp"]
+  def _set_kp(v): config["trk_bearing_kp"] = v; tracker.update_pid_gains() if tracker else None
+  def _get_ki():  return config["trk_bearing_ki"]
+  def _set_ki(v): config["trk_bearing_ki"] = v; tracker.update_pid_gains() if tracker else None
+  def _get_kd():  return config["trk_bearing_kd"]
+  def _set_kd(v): config["trk_bearing_kd"] = v; tracker.update_pid_gains() if tracker else None
+  def _get_max(): return config["trk_bearing_max"]
+  def _set_max(v): config["trk_bearing_max"] = v; tracker.update_pid_gains() if tracker else None
+  def _get_db():  return config["trk_bearing_db"]
+  def _set_db(v): config["trk_bearing_db"] = v; tracker.update_pid_gains() if tracker else None
+
+  return MenuPage(
+    id=PAGE_TRACKER_PID, name="Tracker PID",
+    items=[
+      AdjustItem("Kp:", _get_kp, _set_kp,
+                 0.0, 10.0, 0.1, persistent=True,
+                 formatter=lambda v: "{:.2f}".format(v)),
+      AdjustItem("Ki:", _get_ki, _set_ki,
+                 0.0, 2.0, 0.01, persistent=True,
+                 formatter=lambda v: "{:.3f}".format(v)),
+      AdjustItem("Kd:", _get_kd, _set_kd,
+                 0.0, 2.0, 0.01, persistent=True,
+                 formatter=lambda v: "{:.3f}".format(v)),
+      AdjustItem("MaxRotation:", _get_max, _set_max,
+                 5.0, 100.0, 5.0, persistent=True,
+                 formatter=lambda v: "{:.0f}%".format(v)),
+      AdjustItem("Deadband:", _get_db, _set_db,
+                 0.0, 0.3, 0.01, persistent=True,
+                 formatter=lambda v: "{:.2f}".format(v)),
+      MenuItem("[ Back ]", action=_make_go_action(PAGE_TRACKER, 9)),
+    ],
+    refresh_ms=200,
+  )
+
+
 # =============================================================================
 #                          内部：页面注册
 # =============================================================================
 
-def _register_pages(imu=None, hdg=None):
+def _register_pages(imu=None, hdg=None, tracker=None, camera=None):
   """注册所有页面到全局注册表。由 MenuInit 调用。"""
   _register(_make_main_page())
   _register(_make_imu_page(imu))
@@ -589,6 +713,10 @@ def _register_pages(imu=None, hdg=None):
   if hdg is not None:
     _register(_make_heading_page(imu, hdg))
     _register(_make_heading_pid_page(hdg))
+
+  if tracker is not None:
+    _register(_make_tracker_page(tracker, camera))
+    _register(_make_tracker_pid_page(tracker))
 
 
 # =============================================================================
@@ -599,12 +727,13 @@ def MenuInit(W=320, H=200, Cx=None,
              csPin='B29', rstPin='B31', dcPin='B5', blkPin='C21',
              spiIndex=2, baudrate=60000000,
              step_angle=18, max_visible=5, base_size=16,
-             imu=None, hdg=None):
+             imu=None, hdg=None, tracker=None, camera=None,
+             _lcd=None, _lcd_drv=None):
   """
   初始化菜单系统：屏幕 → 显示驱动 → 加载配置 → 创建 Menu → 注册页面 → 进入主页。
 
   参数：
-    W, H             — 屏幕宽高 (默认 320×200)
+    W, H             — 屏幕宽高 (默认 320x200)
     Cx               — 圆弧圆心 x 偏移 (默认自动计算，适配黄金分割布局)
     csPin, rstPin, dcPin, blkPin — IPS200 引脚
     spiIndex          — SPI 索引
@@ -618,18 +747,22 @@ def MenuInit(W=320, H=200, Cx=None,
   返回：
     Menu 实例 — 调用 menu.handle_input(key) 和 menu.update_display()
   """
-  # 1. 初始化 IPS200 屏幕
-  cs = Pin(csPin, Pin.OUT, value=True); cs.high(); cs.low()
-  rst = Pin(rstPin, Pin.OUT, value=True)
-  dc  = Pin(dcPin,  Pin.OUT, value=True)
-  blk = Pin(blkPin, Pin.OUT, value=True)
+  # 1. 初始化 IPS200 屏幕（若外部已创建则复用）
+  if _lcd is not None:
+    lcd = _lcd
+    lcd_drv = _lcd_drv
+  else:
+    cs = Pin(csPin, Pin.OUT, value=True); cs.high(); cs.low()
+    rst = Pin(rstPin, Pin.OUT, value=True)
+    dc  = Pin(dcPin,  Pin.OUT, value=True)
+    blk = Pin(blkPin, Pin.OUT, value=True)
 
-  lcd_drv = LCD_Drv(SPI_INDEX=spiIndex, BAUDRATE=baudrate,
-                    DC_PIN=dc, RST_PIN=rst, LCD_TYPE=LCD_Drv.LCD200_TYPE)
-  lcd = LCD(lcd_drv)
-  lcd.mode(1)  # 横屏
-  lcd.color(0xFFFF, 0x0000)
-  lcd.clear(0x0000)
+    lcd_drv = LCD_Drv(SPI_INDEX=spiIndex, BAUDRATE=baudrate,
+                      DC_PIN=dc, RST_PIN=rst, LCD_TYPE=LCD_Drv.LCD200_TYPE)
+    lcd = LCD(lcd_drv)
+    lcd.mode(1)  # 横屏
+    lcd.color(0xFFFF, 0x0000)
+    lcd.clear(0x0000)
 
   # 2. 创建显示驱动
   driver = DisplayDriver(lcd, W=W, H=H)
@@ -643,7 +776,7 @@ def MenuInit(W=320, H=200, Cx=None,
               base_size=base_size)
 
   # 5. 注册页面并进入主页
-  _register_pages(imu, hdg)
+  _register_pages(imu, hdg, tracker, camera)
   menu.goto(get_page(PAGE_MAIN))
 
   return menu
@@ -671,11 +804,13 @@ Key Mapping:
   KEY4 (C15)= BACK     — Go back / Cancel edit
 
 Pages:
-  0: Main Menu     — IMU / Heading / About
+  0: Main Menu     — IMU / Heading / Tracker / About
   1: IMU Status    — Yaw/Pitch/Roll (live) + Thresh
   2: About         — Live pin states (C8/C9/C14/C15)
   3: Heading Ctrl  — Go Straight / Lock Yaw / PID tuning
   4: Heading PID   — Kp/Ki/Kd / MaxCorr / Deadband
+  5: Object Tracker — Start/Stop/Class/Speed/PID tuning
+  6: Tracker PID   — Kp/Ki/Kd/MaxRotation/Deadband
 
 Layout:
   Left 38.2%  — Arc menu (5 visible items, focus centered)

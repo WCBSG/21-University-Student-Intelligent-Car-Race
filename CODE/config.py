@@ -22,6 +22,26 @@ DEFAULT_CONFIG = {
   "heading_kd": 0.0,
   "heading_max_correction": 50.0,
   "heading_deadband": 1.0,
+
+  # 视觉跟踪 — Bearing PI
+  "trk_bearing_kp": 1.5,
+  "trk_bearing_ki": 0.05,
+  "trk_bearing_kd": 0.0,
+  "trk_bearing_max": 60.0,
+  "trk_bearing_db": 0.02,
+
+  # 视觉跟踪 — Speed
+  "trk_approach_speed": 15.0,
+  "trk_search_speed": 15.0,
+
+  # 视觉跟踪 — Target selection
+  "trk_target_class": 7,
+  "trk_min_confidence": 22,
+
+  # 视觉跟踪 — Thresholds
+  "trk_confirm_frames": 20,   # 50Hz × 20 = 400ms ≈ 4个相机帧
+  "trk_stop_bottom_pct": 95.0,
+  "trk_reverse_angle": 30.0,
 }
 
 # 全局配置字典 — 模块级单例
