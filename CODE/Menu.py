@@ -1,8 +1,6 @@
 import math
 from time import ticks_ms, ticks_diff
-from machine import Pin
-from display import LCD_Drv, LCD
-from config import config, load_config, save_config
+from config import config, save_config
 
 # 常用颜色
 WHITE = 0xFFFF;YELLOW = 0xFFE0;GREEN = 0x07E0;CYAN = 0x07FF;BLACK = 0x0000;GRAY = 0x7BEF
@@ -285,6 +283,7 @@ class Menu:
         self._dirty = True
       elif item.action:
         item.action(self, item)
+        self._dirty = True    # ★ action 执行后触发重绘
     elif key == 'BACK':
       if self.current_page.on_exit:
         self.current_page.on_exit(self)
@@ -373,11 +372,10 @@ class Menu:
 
 PAGE_MAIN        = 0
 PAGE_IMU         = 1
-PAGE_ABOUT       = 2
-PAGE_HEADING     = 3
-PAGE_HEADING_PID = 4
-PAGE_TRACKER     = 5
-PAGE_TRACKER_PID = 6
+PAGE_HEADING     = 2
+PAGE_HEADING_PID = 3
+PAGE_TRACKER     = 4
+PAGE_TRACKER_PID = 5
 
 
 # =============================================================================
@@ -402,7 +400,6 @@ def _make_main_page():
       MenuItem("IMU",     action=_make_go_action(PAGE_IMU, 0)),
       MenuItem("Heading", action=_make_go_action(PAGE_HEADING, 0)),
       MenuItem("Tracker >", action=_make_go_action(PAGE_TRACKER, 0)),
-      MenuItem("About",   action=_make_go_action(PAGE_ABOUT, 0)),
     ],
   )
 
@@ -424,18 +421,15 @@ def _make_imu_page(imu):
       MenuItem("Roll",  get_value=_get_roll),
     ]
     # 若已标定显示零偏 + 手动重标定，否则显示标定进度
-    if imu.is_calibrated:
-      bx, by, bz = imu.bias_dps
-      imu_items.append(
-        MenuItem("Bias", get_value=lambda: f"G:{bx:.2f},{by:.2f},{bz:.2f} dps")
-      )
-      imu_items.append(
-        MenuItem("Recal Gyro", action=lambda m, i: imu.recalibrate())
-      )
-    else:
-      imu_items.append(
-        MenuItem("Calibrating...")
-      )
+    # ★ get_value 用 lambda 动态读取，避免闭包捕获启动时的冻结值
+    imu_items.append(
+      MenuItem("Bias",
+        get_value=lambda: "G:{:.2f},{:.2f},{:.2f} dps".format(*imu.bias_dps)
+          if imu.is_calibrated else "Calibrating...")
+    )
+    imu_items.append(
+      MenuItem("Recal Gyro", action=lambda m, i: imu.recalibrate())
+    )
   else:
     imu_items = [
       MenuItem("IMU not connected"),
@@ -455,104 +449,83 @@ def _make_imu_page(imu):
   )
 
 
-def _make_about_page():
-  """About / 引脚状态页"""
-  # 注意：C8/C9/C14/C15 与 KEY_HANDLER 共用，Pin 初始化可能冲突
-  try:
-    _pin_c8  = Pin('C8',  Pin.IN, pull=Pin.PULL_UP_47K)
-    _pin_c9  = Pin('C9',  Pin.IN, pull=Pin.PULL_UP_47K)
-    _pin_c14 = Pin('C14', Pin.IN, pull=Pin.PULL_UP_47K)
-    _pin_c15 = Pin('C15', Pin.IN, pull=Pin.PULL_UP_47K)
+def _make_heading_page(imu, hdg, intents=None, robot=None):
+  """航向闭环控制页。有 intents 时只发 Intent，不再直调 hdg。"""
+  from app import intent as I
+  from app.mode import HDG as ST_HDG, IDLE as ST_IDLE
 
-    _get_c8  = lambda: "C8:H"  if _pin_c8.value()  else "C8:L"
-    _get_c9  = lambda: "C9:H"  if _pin_c9.value()  else "C9:L"
-    _get_c14 = lambda: "C14:H" if _pin_c14.value() else "C14:L"
-    _get_c15 = lambda: "C15:H" if _pin_c15.value() else "C15:L"
-  except:
-    _get_c8  = lambda: "C8:--"
-    _get_c9  = lambda: "C9:--"
-    _get_c14 = lambda: "C14:--"
-    _get_c15 = lambda: "C15:--"
-
-  return MenuPage(
-    id=PAGE_ABOUT, name="About",
-    items=[
-      MenuItem("C8",  get_value=_get_c8),
-      MenuItem("C9",  get_value=_get_c9),
-      MenuItem("C14", get_value=_get_c14),
-      MenuItem("C15", get_value=_get_c15),
-      MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 2)),
-    ],
-  )
-
-
-def _make_heading_page(imu, hdg):
-  """航向闭环控制页"""
-  # 目标航向（闭包可变捕获，MicroPython 无 nonlocal，用 list）
   _target_yaw = [0.0]
 
-  # 状态行
   def _get_hdg_status():
     if not imu or not imu.is_calibrated:
       return "IMU Calibrating..."
-    mode = hdg.mode
-    if mode == 'idle':
+    if robot is None or robot.state != ST_HDG:
+      if robot is not None and robot.state != ST_IDLE:
+        return "FSM:" + robot.state
       return "Status: Idle"
-    err = hdg.heading_error
-    tgt = hdg.target_heading
-    if mode == 'straight':
-      return "Straight | Err:{:+.1f} | Spd:{:.0f}%".format(err, hdg.forward_speed)
-    elif mode == 'lock':
-      return "Lock -> {:+.0f} | Err:{:+.1f}".format(tgt, err)
-    return "Status: " + mode
+    m = robot.mode
+    err = getattr(m, "last_error", 0.0)
+    tgt = getattr(m, "target_heading", 0.0)
+    sub = getattr(m, "sub_mode", "straight")
+    if sub == "straight":
+      return "Straight | Err:{:+.1f} | Spd:{:.0f}%".format(
+        err, getattr(m, "forward_speed", 0.0))
+    return "Lock -> {:+.0f} | Err:{:+.1f}".format(tgt, err)
 
-  # 目标航向 get/set (闭包捕获 _target_yaw)
   def _get_target_yaw(): return _target_yaw[0]
   def _set_target_yaw(v): _target_yaw[0] = v
-
   def _get_speed(): return config["target_speed"]
   def _set_speed(v): config["target_speed"] = v
+
+  def _go_straight(m, i):
+    if intents is not None:
+      intents.post(I.GO_STRAIGHT)
+
+  def _lock_yaw(m, i):
+    if intents is not None:
+      intents.post(I.LOCK_YAW, _target_yaw[0])
+
+  def _lock_cur(m, i):
+    if intents is not None:
+      intents.post(I.LOCK_YAW)
+
+  def _stop(m, i):
+    if intents is not None:
+      intents.post(I.STOP)
 
   return MenuPage(
     id=PAGE_HEADING, name="Heading Control",
     items=[
       MenuItem("Status", get_value=_get_hdg_status),
-
       AdjustItem("Speed:", _get_speed, _set_speed,
                  0.0, 100.0, 5.0, persistent=True,
                  formatter=lambda v: "{:.0f}%".format(v)),
-
-      MenuItem("Go Straight", action=lambda m, i: hdg.mode_straight()),
-
+      MenuItem("Go Straight", action=_go_straight),
       AdjustItem("Target:", _get_target_yaw, _set_target_yaw,
                  -180.0, 180.0, 5.0, persistent=False,
                  formatter=lambda v: "{:+.0f} deg".format(v)),
-
-      MenuItem("Lock Yaw", action=lambda m, i: hdg.mode_lock(_target_yaw[0])),
-
-      MenuItem("Lock Current", action=lambda m, i: hdg.mode_lock()),
-
-      MenuItem("STOP", action=lambda m, i: hdg.mode_idle()),
-
+      MenuItem("Lock Yaw", action=_lock_yaw),
+      MenuItem("Lock Current", action=_lock_cur),
+      MenuItem("STOP", action=_stop),
       MenuItem("PID Tune >", action=_make_go_action(PAGE_HEADING_PID, 0)),
-
       MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 1)),
     ],
+    refresh_ms=200,
   )
 
 
 def _make_heading_pid_page(hdg):
-  """航向 PID 调参页"""
+  """航向 PID 调参页（引用模式 → update_pid_gains 为 no-op）"""
   def _get_hkp():  return config["heading_kp"]
-  def _set_hkp(v): config["heading_kp"] = v; hdg.update_pid_gains()
+  def _set_hkp(v): config["heading_kp"] = v
   def _get_hki():  return config["heading_ki"]
-  def _set_hki(v): config["heading_ki"] = v; hdg.update_pid_gains()
+  def _set_hki(v): config["heading_ki"] = v
   def _get_hkd():  return config["heading_kd"]
-  def _set_hkd(v): config["heading_kd"] = v; hdg.update_pid_gains()
+  def _set_hkd(v): config["heading_kd"] = v
   def _get_hmax(): return config["heading_max_correction"]
-  def _set_hmax(v): config["heading_max_correction"] = v; hdg.update_pid_gains()
+  def _set_hmax(v): config["heading_max_correction"] = v
   def _get_hdb():  return config["heading_deadband"]
-  def _set_hdb(v): config["heading_deadband"] = v; hdg.update_pid_gains()
+  def _set_hdb(v): config["heading_deadband"] = v
 
   return MenuPage(
     id=PAGE_HEADING_PID, name="Heading PID",
@@ -577,29 +550,39 @@ def _make_heading_pid_page(hdg):
   )
 
 
-def _make_tracker_page(tracker, camera):
-  """视觉跟踪主页面"""
+def _make_tracker_page(tracker, camera, intents=None, robot=None):
+  """视觉跟踪主页面。有 intents 时只发 Intent。"""
+  from app import intent as I
+  from app.mode import IDLE, SEARCH, TRACK, COMPLETE, FAULT
+
   CLASS_NAMES = {7: "Any", 0: "Sandbag", 1: "Netball", 2: "Bear"}
+  _STATE_MAP = {
+    IDLE: "IDLE", SEARCH: "SEARCHING", TRACK: "TRACKING",
+    COMPLETE: "COMPLETE", FAULT: "FAULT", "HDG": "IDLE",
+  }
 
   def _get_status():
     if camera is None:
       return "Camera: N/A"
-    if hasattr(camera, 'failed') and camera.failed:
+    if getattr(camera, "failed", False):
       return "Camera: Self-Test FAILED"
-    if not camera.is_ready():
+    if not camera.is_ready:
       return "Camera: Disconnected"
-    dets = camera.get_detections()
-    n = len(dets)
-    st = tracker.state if tracker else 'IDLE'
-    if st == 'IDLE':
+    n = len(camera.detections)
+    if robot is None:
+      return "{} targets".format(n)
+    st = _STATE_MAP.get(robot.state, robot.state)
+    if st == "IDLE":
       return "Idle | {} targets".format(n)
-    elif st == 'SEARCHING':
+    if st == "SEARCHING":
       return "Searching... | {} targets".format(n)
-    elif st == 'TRACKING':
-      info = tracker.target_info if tracker.target_info else "--"
+    if st == "TRACKING":
+      info = robot.target_info if robot.target_info else "--"
       return "TRACK | {} | {} targets".format(info, n)
-    elif st == 'COMPLETE':
+    if st == "COMPLETE":
       return "COMPLETE [BACK to return]"
+    if st == "FAULT":
+      return "FAULT — Reconnect"
     return st
 
   def _get_tgt_cls():  return config["trk_target_class"]
@@ -609,7 +592,6 @@ def _make_tracker_page(tracker, camera):
 
   def _get_min_conf():  return config["trk_min_confidence"]
   def _set_min_conf(v): config["trk_min_confidence"] = int(v)
-
   def _get_app_spd():  return config["trk_approach_speed"]
   def _set_app_spd(v): config["trk_approach_speed"] = v
   def _get_srch_spd(): return config["trk_search_speed"]
@@ -620,17 +602,16 @@ def _make_tracker_page(tracker, camera):
   def _set_rev_ang(v): config["trk_reverse_angle"] = v
 
   def _action_start(m, i):
-    if tracker:
-      if not tracker.start():
-        pass  # IMU 未校准，start() 内部静默失败
+    if intents is not None:
+      intents.post(I.START_TRACK)
 
   def _action_stop(m, i):
-    if tracker:
-      tracker.stop()
+    if intents is not None:
+      intents.post(I.STOP)
 
   def _action_reconnect(m, i):
-    if camera:
-      camera.handshake(retries=50, retry_ms=100)
+    if intents is not None:
+      intents.post(I.RECONNECT)
 
   return MenuPage(
     id=PAGE_TRACKER, name="Object Tracker",
@@ -664,17 +645,17 @@ def _make_tracker_page(tracker, camera):
 
 
 def _make_tracker_pid_page(tracker):
-  """视觉跟踪 PID 调参页"""
+  """视觉跟踪 PID 调参页（引用模式）"""
   def _get_kp():  return config["trk_bearing_kp"]
-  def _set_kp(v): config["trk_bearing_kp"] = v; tracker.update_pid_gains() if tracker else None
+  def _set_kp(v): config["trk_bearing_kp"] = v
   def _get_ki():  return config["trk_bearing_ki"]
-  def _set_ki(v): config["trk_bearing_ki"] = v; tracker.update_pid_gains() if tracker else None
+  def _set_ki(v): config["trk_bearing_ki"] = v
   def _get_kd():  return config["trk_bearing_kd"]
-  def _set_kd(v): config["trk_bearing_kd"] = v; tracker.update_pid_gains() if tracker else None
+  def _set_kd(v): config["trk_bearing_kd"] = v
   def _get_max(): return config["trk_bearing_max"]
-  def _set_max(v): config["trk_bearing_max"] = v; tracker.update_pid_gains() if tracker else None
+  def _set_max(v): config["trk_bearing_max"] = v
   def _get_db():  return config["trk_bearing_db"]
-  def _set_db(v): config["trk_bearing_db"] = v; tracker.update_pid_gains() if tracker else None
+  def _set_db(v): config["trk_bearing_db"] = v
 
   return MenuPage(
     id=PAGE_TRACKER_PID, name="Tracker PID",
@@ -704,18 +685,18 @@ def _make_tracker_pid_page(tracker):
 #                          内部：页面注册
 # =============================================================================
 
-def _register_pages(imu=None, hdg=None, tracker=None, camera=None):
+def _register_pages(imu=None, hdg=None, tracker=None, camera=None,
+                    intents=None, robot=None):
   """注册所有页面到全局注册表。由 MenuInit 调用。"""
   _register(_make_main_page())
   _register(_make_imu_page(imu))
-  _register(_make_about_page())
 
-  if hdg is not None:
-    _register(_make_heading_page(imu, hdg))
+  if hdg is not None or robot is not None:
+    _register(_make_heading_page(imu, hdg, intents=intents, robot=robot))
     _register(_make_heading_pid_page(hdg))
 
-  if tracker is not None:
-    _register(_make_tracker_page(tracker, camera))
+  if tracker is not None or robot is not None:
+    _register(_make_tracker_page(tracker, camera, intents=intents, robot=robot))
     _register(_make_tracker_pid_page(tracker))
 
 
@@ -728,6 +709,7 @@ def MenuInit(W=320, H=200, Cx=None,
              spiIndex=2, baudrate=60000000,
              step_angle=18, max_visible=5, base_size=16,
              imu=None, hdg=None, tracker=None, camera=None,
+             intents=None, robot=None,
              _lcd=None, _lcd_drv=None):
   """
   初始化菜单系统：屏幕 → 显示驱动 → 加载配置 → 创建 Menu → 注册页面 → 进入主页。
@@ -752,6 +734,8 @@ def MenuInit(W=320, H=200, Cx=None,
     lcd = _lcd
     lcd_drv = _lcd_drv
   else:
+    from machine import Pin
+    from display import LCD_Drv, LCD
     cs = Pin(csPin, Pin.OUT, value=True); cs.high(); cs.low()
     rst = Pin(rstPin, Pin.OUT, value=True)
     dc  = Pin(dcPin,  Pin.OUT, value=True)
@@ -767,56 +751,17 @@ def MenuInit(W=320, H=200, Cx=None,
   # 2. 创建显示驱动
   driver = DisplayDriver(lcd, W=W, H=H)
 
-  # 3. 加载持久化配置
-  load_config()
-
-  # 4. 创建菜单
+  # 3. 创建菜单（config 已由 main load）
   menu = Menu(driver.render, W=W, H=H, Cx=Cx,
               step_angle=step_angle, max_visible=max_visible,
               base_size=base_size)
 
-  # 5. 注册页面并进入主页
-  _register_pages(imu, hdg, tracker, camera)
+  # 4. 注册页面并进入主页
+  _register_pages(imu, hdg, tracker, camera, intents=intents, robot=robot)
   menu.goto(get_page(PAGE_MAIN))
 
   return menu
 
 
 def MenuHelp():
-  """返回菜单系统帮助信息。"""
-  return """
-=== Ring Menu System ===
-
-Public API:
-  MenuInit(**kwargs) -> Menu
-  MenuHelp() -> str
-
-Menu Methods:
-  goto(page, focus_index=0)   — Switch to a page
-  jump_to(page_id, focus=0)   — Jump by page ID
-  handle_input(key)           — Process key: UP/DOWN/ENTER/BACK
-  update_display()            — Render arc layout + info panel
-
-Key Mapping:
-  KEY1 (C8) = UP       — Previous item / Increase value
-  KEY2 (C9) = DOWN     — Next item / Decrease value
-  KEY3 (C14)= ENTER    — Select / Confirm edit
-  KEY4 (C15)= BACK     — Go back / Cancel edit
-
-Pages:
-  0: Main Menu     — IMU / Heading / Tracker / About
-  1: IMU Status    — Yaw/Pitch/Roll (live) + Thresh
-  2: About         — Live pin states (C8/C9/C14/C15)
-  3: Heading Ctrl  — Go Straight / Lock Yaw / PID tuning
-  4: Heading PID   — Kp/Ki/Kd / MaxCorr / Deadband
-  5: Object Tracker — Start/Stop/Class/Speed/PID tuning
-  6: Tracker PID   — Kp/Ki/Kd/MaxRotation/Deadband
-
-Layout:
-  Left 38.2%  — Arc menu (5 visible items, focus centered)
-  Right 61.8% — Title (top) + Value (middle)
-
-Config:
-  Params stored in /flash/config.json (auto-created)
-  AdjustItems with persistent=True auto-save on ENTER
-"""
+  return "Ring Menu: UP/DOWN/ENTER/BACK"

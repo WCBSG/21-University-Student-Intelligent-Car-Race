@@ -1,68 +1,180 @@
 """
-config.py — 集中持久化模块
+config.py — 显式 Config（plain class + 引用）
 
-全局 config 字典是唯一持久化数据源，文件读写仅由此模块负责。
-save_config() 采用原子写入（tmp + rename），防止写一半断电损坏配置。
+启动 Config.load() 一次；之后可变。Controller 持有 PidGains 引用，
+菜单改字段即生效，无需 update_pid_gains()。
+
+兼容：保留 dict 风格 config[key]，供 Menu 过渡期使用。
 """
 
-import json, os
+import json
+import os
 
 CONFIG_FILE = "/flash/config.json"
 
-DEFAULT_CONFIG = {
-  # 速度参数
-  "target_speed": 50.0,
 
-  # 角度阈值
-  "angle_threshold": 10.0,
+class PidGains:
+  """PID 增益对象 — Controller 持引用，不拷贝。"""
 
-  # 航向闭环 PID
-  "heading_kp": 2.0,
-  "heading_ki": 0.0,
-  "heading_kd": 0.0,
-  "heading_max_correction": 50.0,
-  "heading_deadband": 1.0,
+  def __init__(self, kp=2.0, ki=0.0, kd=0.0, max_out=50.0, deadband=1.0):
+    self.kp = kp
+    self.ki = ki
+    self.kd = kd
+    self.max_out = max_out
+    self.deadband = deadband
 
-  # 视觉跟踪 — Bearing PI
-  "trk_bearing_kp": 1.5,
-  "trk_bearing_ki": 0.05,
-  "trk_bearing_kd": 0.0,
-  "trk_bearing_max": 60.0,
-  "trk_bearing_db": 0.02,
 
-  # 视觉跟踪 — Speed
-  "trk_approach_speed": 15.0,
-  "trk_search_speed": 15.0,
+class TrackingParams:
+  """视觉跟踪非 PID 参数。"""
 
-  # 视觉跟踪 — Target selection
-  "trk_target_class": 7,
-  "trk_min_confidence": 22,
+  def __init__(self):
+    self.approach_speed = 15.0
+    self.search_speed = 15.0
+    self.target_class = 7
+    self.min_confidence = 22
+    # 按相机帧计数的去抖阈值（约 400ms @ ~10fps 相机）
+    self.confirm_frames = 4
+    self.lost_frames = 4
+    self.stop_bottom_pct = 95.0
+    self.reverse_angle = 30.0
+    self.cam_timeout_ms = 5000
 
-  # 视觉跟踪 — Thresholds
-  "trk_confirm_frames": 20,   # 50Hz × 20 = 400ms ≈ 4个相机帧
-  "trk_stop_bottom_pct": 95.0,
-  "trk_reverse_angle": 30.0,
-}
 
-# 全局配置字典 — 模块级单例
-config = {}
+class Config:
+  """
+  可变配置单例内容。load() 返回实例；save() 原子写盘。
+
+  Controller 应持有 self.heading / self.tracking_bearing 引用。
+  """
+
+  def __init__(self):
+    self.target_speed = 50.0
+    self.angle_threshold = 10.0
+    self.heading = PidGains(kp=2.0, ki=0.0, kd=0.0, max_out=50.0, deadband=1.0)
+    self.tracking_bearing = PidGains(kp=1.5, ki=0.05, kd=0.0, max_out=60.0, deadband=0.02)
+    self.tracking = TrackingParams()
+
+  # —— dict 兼容（Menu 过渡）——————————————————————————————
+
+  _KEY_GET = {
+    "target_speed": lambda c: c.target_speed,
+    "angle_threshold": lambda c: c.angle_threshold,
+    "heading_kp": lambda c: c.heading.kp,
+    "heading_ki": lambda c: c.heading.ki,
+    "heading_kd": lambda c: c.heading.kd,
+    "heading_max_correction": lambda c: c.heading.max_out,
+    "heading_deadband": lambda c: c.heading.deadband,
+    "trk_bearing_kp": lambda c: c.tracking_bearing.kp,
+    "trk_bearing_ki": lambda c: c.tracking_bearing.ki,
+    "trk_bearing_kd": lambda c: c.tracking_bearing.kd,
+    "trk_bearing_max": lambda c: c.tracking_bearing.max_out,
+    "trk_bearing_db": lambda c: c.tracking_bearing.deadband,
+    "trk_approach_speed": lambda c: c.tracking.approach_speed,
+    "trk_search_speed": lambda c: c.tracking.search_speed,
+    "trk_target_class": lambda c: c.tracking.target_class,
+    "trk_min_confidence": lambda c: c.tracking.min_confidence,
+    "trk_confirm_frames": lambda c: c.tracking.confirm_frames,
+    "trk_stop_bottom_pct": lambda c: c.tracking.stop_bottom_pct,
+    "trk_reverse_angle": lambda c: c.tracking.reverse_angle,
+  }
+
+  _KEY_SET = {
+    "target_speed": lambda c, v: setattr(c, "target_speed", float(v)),
+    "angle_threshold": lambda c, v: setattr(c, "angle_threshold", float(v)),
+    "heading_kp": lambda c, v: setattr(c.heading, "kp", float(v)),
+    "heading_ki": lambda c, v: setattr(c.heading, "ki", float(v)),
+    "heading_kd": lambda c, v: setattr(c.heading, "kd", float(v)),
+    "heading_max_correction": lambda c, v: setattr(c.heading, "max_out", float(v)),
+    "heading_deadband": lambda c, v: setattr(c.heading, "deadband", float(v)),
+    "trk_bearing_kp": lambda c, v: setattr(c.tracking_bearing, "kp", float(v)),
+    "trk_bearing_ki": lambda c, v: setattr(c.tracking_bearing, "ki", float(v)),
+    "trk_bearing_kd": lambda c, v: setattr(c.tracking_bearing, "kd", float(v)),
+    "trk_bearing_max": lambda c, v: setattr(c.tracking_bearing, "max_out", float(v)),
+    "trk_bearing_db": lambda c, v: setattr(c.tracking_bearing, "deadband", float(v)),
+    "trk_approach_speed": lambda c, v: setattr(c.tracking, "approach_speed", float(v)),
+    "trk_search_speed": lambda c, v: setattr(c.tracking, "search_speed", float(v)),
+    "trk_target_class": lambda c, v: setattr(c.tracking, "target_class", int(v)),
+    "trk_min_confidence": lambda c, v: setattr(c.tracking, "min_confidence", int(v)),
+    "trk_confirm_frames": lambda c, v: setattr(c.tracking, "confirm_frames", int(v)),
+    "trk_stop_bottom_pct": lambda c, v: setattr(c.tracking, "stop_bottom_pct", float(v)),
+    "trk_reverse_angle": lambda c, v: setattr(c.tracking, "reverse_angle", float(v)),
+  }
+
+  def __getitem__(self, key):
+    fn = self._KEY_GET.get(key)
+    if fn is None:
+      raise KeyError(key)
+    return fn(self)
+
+  def __setitem__(self, key, value):
+    fn = self._KEY_SET.get(key)
+    if fn is None:
+      raise KeyError(key)
+    fn(self, value)
+
+  def get(self, key, default=None):
+    try:
+      return self[key]
+    except KeyError:
+      return default
+
+  def to_dict(self):
+    d = {}
+    for k in self._KEY_GET:
+      d[k] = self[k]
+    d["trk_lost_frames"] = self.tracking.lost_frames
+    d["cam_timeout_ms"] = self.tracking.cam_timeout_ms
+    return d
+
+  def _apply_dict(self, loaded):
+    for k, v in loaded.items():
+      if k == "trk_lost_frames":
+        self.tracking.lost_frames = int(v)
+      elif k == "cam_timeout_ms":
+        self.tracking.cam_timeout_ms = int(v)
+      elif k in self._KEY_SET:
+        self[k] = v
+
+  @classmethod
+  def load(cls, path=CONFIG_FILE):
+    cfg = cls()
+    try:
+      with open(path, "r") as f:
+        loaded = json.load(f)
+      cfg._apply_dict(loaded)
+    except (OSError, ValueError):
+      cfg.save(path)
+    return cfg
+
+  def save(self, path=CONFIG_FILE):
+    tmp = path + ".tmp"
+    try:
+      with open(tmp, "w") as f:
+        json.dump(self.to_dict(), f)
+      os.rename(tmp, path)
+    except (OSError, ValueError) as e:
+      print("[CONFIG] Save failed:", e)
+
+
+# 模块级单例 — 启动时 Config.load() 填入；load_config() 兼容旧调用
+config = Config()
 
 
 def load_config():
-  """启动时调用。从 /flash/config.json 读取，失败则用默认值并自动创建文件。"""
-  global config
+  """兼容旧 API：原地更新模块级 config（保持对象引用稳定）。"""
   try:
-    with open(CONFIG_FILE,"r") as f:loaded = json.load(f)
-    # 用加载值更新 config，缺失的键保留默认值
-    config.update(DEFAULT_CONFIG)
-    config.update(loaded)
-  except:
-    config.update(DEFAULT_CONFIG)
-    save_config()
+    with open(CONFIG_FILE, "r") as f:
+      loaded = json.load(f)
+    config._apply_dict(loaded)
+  except (OSError, ValueError):
+    # 设备上无文件时写默认；PC/无 /flash 时仅保留内存默认
+    try:
+      config.save()
+    except (OSError, ValueError):
+      pass
+  return config
 
 
 def save_config():
-  """原子写入：先写 .tmp，再 rename。仅在必要时调用。"""
-  tmp=CONFIG_FILE+".tmp"
-  with open(tmp,"w") as f:json.dump(config, f)
-  os.rename(tmp,CONFIG_FILE)
+  """兼容旧 API。"""
+  config.save()

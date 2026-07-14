@@ -159,12 +159,23 @@ class MadgwickAHRS:
       self.q3 /= q_norm
 
   def _integrate_gyro_only(self, gx, gy, gz):
-    """加速度计无效时仅靠陀螺仪积分。"""
+    """加速度计无效时仅靠陀螺仪积分。★ 需要归一化防止四元数幅度漂移。"""
     q0, q1, q2, q3 = self.q0, self.q1, self.q2, self.q3
     self.q0 += 0.5 * (-q1 * gx - q2 * gy - q3 * gz) * self.dt
     self.q1 += 0.5 * (q0 * gx + q2 * gz - q3 * gy) * self.dt
     self.q2 += 0.5 * (q0 * gy - q1 * gz + q3 * gx) * self.dt
     self.q3 += 0.5 * (q0 * gz + q1 * gy - q2 * gx) * self.dt
+
+    # 归一化（防止连续多帧仅靠陀螺仪积分导致幅度漂移）
+    q_norm = math.sqrt(
+      self.q0 * self.q0 + self.q1 * self.q1 +
+      self.q2 * self.q2 + self.q3 * self.q3
+    )
+    if q_norm > 1e-10:
+      self.q0 /= q_norm
+      self.q1 /= q_norm
+      self.q2 /= q_norm
+      self.q3 /= q_norm
 
   # ——————————————————————————————————————————————————————————
   #                      欧拉角提取
@@ -249,6 +260,10 @@ class ImuSensor:
     self._calib_gz = 0.0
     self._calibrated = False
 
+    # ★ 双缓冲快照：ISR write → _snap[_idx]；主循环 read → _snap[1-_idx]
+    self._snap = [0.0] * 8   # 2 slots × 4 quaternion [q0,q1,q2,q3]
+    self._snap_idx = 0
+
     # 在线零偏跟踪 (EMA)
     self._bias_alpha = 0.002   # EMA 平滑因子，~5 秒静止修正 63%
     self._still_count = 0       # 连续静止帧计数
@@ -315,25 +330,47 @@ class ImuSensor:
     # —— 运行 Madgwick 融合 ————————————————————————————
     self._filter.update(gx, gy, gz, ax, ay, az)
 
+    # ★ 双缓冲快照（ISR 写，主循环读）
+    f = self._filter
+    off = self._snap_idx * 4
+    self._snap[off]     = f.q0
+    self._snap[off + 1] = f.q1
+    self._snap[off + 2] = f.q2
+    self._snap[off + 3] = f.q3
+    self._snap_idx ^= 1
+
   # ——————————————————————————————————————————————————————————
-  #                      姿态获取
+  #                      姿态获取（读快照）
   # ——————————————————————————————————————————————————————————
+
+  def _read_snap(self):
+    return tuple(self._snap[(1 - self._snap_idx) * 4 + i] for i in range(4))
 
   def get_yaw(self):
     """偏航角, deg, [-180, 180]。未标定完成返回 0。"""
     if not self._calibrated:
       return 0.0
-    return self._filter.get_yaw()
+    q0, q1, q2, q3 = self._read_snap()
+    yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
+                     1.0 - 2.0 * (q2 * q2 + q3 * q3))
+    return yaw * RAD_TO_DEG
 
   def get_pitch(self):
     if not self._calibrated:
       return 0.0
-    return self._filter.get_pitch()
+    q0, q1, q2, q3 = self._read_snap()
+    sin_pitch = 2.0 * (q0 * q1 - q2 * q3)
+    if abs(sin_pitch) > 1.0:
+      sin_pitch = 1.0 if sin_pitch > 0 else -1.0
+    return math.asin(sin_pitch) * RAD_TO_DEG
 
   def get_roll(self):
     if not self._calibrated:
       return 0.0
-    return self._filter.get_roll()
+    q0, q1, q2, q3 = self._read_snap()
+    roll = math.atan2(2.0 * (q0 * q2 + q1 * q3),
+                      1.0 - 2.0 * (q1 * q1 + q2 * q2))
+    return roll * RAD_TO_DEG
 
   # ——————————————————————————————————————————————————————————
   #                      原始数据
