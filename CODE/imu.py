@@ -254,12 +254,19 @@ class ImuSensor:
     self._calib_gz = 0.0
     self._calibrated = False
 
-    self._snap = [0.0] * 8
+    self._snap = [0.0] * 10  # 2×(q0,q1,q2,q3,gyro_yaw)
     self._snap_idx = 0
 
     self._bias_alpha = 0.002
     self._still_count = 0
     self._still_needed = 50
+
+    # 磁力计 (仅 963)
+    self._mag_enabled = False      # MATCH 默认关
+    self._mag_alpha = 0.01         # 互补滤波系数
+    self._mag_off = [0.0, 0.0, 0.0]  # 硬铁偏移
+    self._mx = 0.0; self._my = 0.0; self._mz = 0.0
+    self._gyro_yaw = 0.0           # 纯陀螺累积 yaw (deg)
 
   def update(self):
     """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
@@ -295,6 +302,12 @@ class ImuSensor:
     gy -= self._bias[1]
     gz -= self._bias[2]
 
+    # ★ 660 轴 remap → 对齐 963 车体系 (X前 Y右 Z上)
+    # 实测: 660 前倾→roll↓, 左倾→pitch↑ → ax,ay 互换 + Y 取反
+    if self.model == "660":
+      ax, ay = ay, -ax
+      gx, gy = gy, -gx
+
     gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
     acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
     is_still = (gyro_mag < 0.0175) and (abs(acc_mag - 1.0) < 0.05)
@@ -311,12 +324,24 @@ class ImuSensor:
 
     self._filter.update(gx, gy, gz, ax, ay, az)
 
+    # 磁力计快照 (仅 963, 硬铁校正后存)
+    if self.model == "963":
+      mx, my, mz = d[6], d[7], d[8]
+      if self._mag_enabled:
+        mx -= self._mag_off[0]; my -= self._mag_off[1]
+        self._mx = mx; self._my = my; self._mz = mz
+
+    # 纯陀螺 yaw 累积 (用于互补融合)
+    self._gyro_yaw += gz * self._filter.dt * RAD_TO_DEG
+    self._gyro_yaw = self._normalize_angle(self._gyro_yaw)
+
     f = self._filter
-    off = self._snap_idx * 4
+    off = self._snap_idx * 5  # 每槽 5 个 float
     self._snap[off]     = f.q0
     self._snap[off + 1] = f.q1
     self._snap[off + 2] = f.q2
     self._snap[off + 3] = f.q3
+    self._snap[off + 4] = self._gyro_yaw
     self._snap_idx ^= 1
 
   # ——————————————————————————————————————————————————————————
@@ -324,13 +349,14 @@ class ImuSensor:
   # ——————————————————————————————————————————————————————————
 
   def _read_snap(self):
-    return tuple(self._snap[(1 - self._snap_idx) * 4 + i] for i in range(4))
+    off = (1 - self._snap_idx) * 5
+    return tuple(self._snap[off + i] for i in range(5))
 
   def get_yaw(self):
-    """偏航角, deg, [-180, 180]。未标定完成返回 0。"""
+    """Madgwick 偏航角, deg, [-180, 180]。未标定完成返回 0。"""
     if not self._calibrated:
       return 0.0
-    q0, q1, q2, q3 = self._read_snap()
+    q0, q1, q2, q3, _ = self._read_snap()
     yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
                      1.0 - 2.0 * (q2 * q2 + q3 * q3))
     return yaw * RAD_TO_DEG
@@ -338,7 +364,7 @@ class ImuSensor:
   def get_pitch(self):
     if not self._calibrated:
       return 0.0
-    q0, q1, q2, q3 = self._read_snap()
+    q0, q1, q2, q3, _ = self._read_snap()
     sin_pitch = 2.0 * (q0 * q1 - q2 * q3)
     if abs(sin_pitch) > 1.0:
       sin_pitch = 1.0 if sin_pitch > 0 else -1.0
@@ -347,10 +373,104 @@ class ImuSensor:
   def get_roll(self):
     if not self._calibrated:
       return 0.0
-    q0, q1, q2, q3 = self._read_snap()
+    q0, q1, q2, q3, _ = self._read_snap()
     roll = math.atan2(2.0 * (q0 * q2 + q1 * q3),
                       1.0 - 2.0 * (q1 * q1 + q2 * q2))
     return roll * RAD_TO_DEG
+
+  def get_gyro_yaw(self):
+    """纯陀螺累积 yaw (deg)。"""
+    if not self._calibrated:
+      return 0.0
+    return self._snap[(1 - self._snap_idx) * 5 + 4]
+
+  def get_mag_heading(self):
+    """
+    磁力计航向角 (deg), 倾角补偿, 车体系 (X前 Y右 Z上)。
+    仅 963 有效；660 或无 mag 数据返回 None。
+    """
+    if self.model != "963" or not self._mag_enabled:
+      return None
+    if not self._calibrated:
+      return None
+    mx, my, mz = self._mx, self._my, self._mz
+    if abs(mx) < 1 and abs(my) < 1:
+      return None  # mag 数据太弱
+
+    roll = self.get_roll() * DEG_TO_RAD
+    pitch = self.get_pitch() * DEG_TO_RAD
+    cos_r, sin_r = math.cos(roll), math.sin(roll)
+    cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+
+    # 倾角补偿：把磁矢量投到水平面
+    mx_h = mx * cos_p + mz * sin_p
+    my_h = mx * sin_r * sin_p + my * cos_r - mz * sin_r * cos_p
+
+    heading = math.atan2(my_h, mx_h) * RAD_TO_DEG  # Y右系
+    return self._normalize_angle(heading)
+
+  def get_fused_yaw(self, motor_on=False, alpha=None):
+    """
+    互补融合航向角 (deg)。motor_on 或陀螺快 → 纯陀螺; 静止/低速 → 融合磁。
+    返回 (yaw, source): source='gyro'|'mag'。
+    """
+    gyro = self.get_gyro_yaw()
+    if not self._mag_enabled or self.model != "660" and self.model != "963":
+      return gyro, "gyro"
+
+    mag = self.get_mag_heading()
+    if mag is None:
+      return gyro, "gyro"
+
+    # 自适应 α
+    if alpha is not None:
+      a = alpha
+    elif motor_on:
+      a = 0.0           # 电机转 → 磁干扰，纯陀螺
+    else:
+      # 用 gyro_yaw 变化率判断运动
+      a = self._mag_alpha  # 默认 0.01
+
+    if a <= 0.0:
+      return gyro, "gyro"
+
+    # 互补: yaw → gyro + α·(mag_diff)
+    diff = self._normalize_angle(mag - gyro)
+    fused = gyro + a * diff
+    return self._normalize_angle(fused), "mag"
+
+  # ——————————————————————————————————————————————————————————
+  #                      磁力计参数
+  # ——————————————————————————————————————————————————————————
+
+  @property
+  def mag_enabled(self):
+    return self._mag_enabled
+
+  @mag_enabled.setter
+  def mag_enabled(self, v):
+    self._mag_enabled = bool(v)
+
+  @property
+  def mag_data(self):
+    """(mx, my, mz) raw（已去硬铁偏移）。"""
+    return (self._mx, self._my, self._mz)
+
+  def set_mag_offset(self, mx_off, my_off, mz_off=0.0):
+    self._mag_off = [mx_off, my_off, mz_off]
+
+  def set_mag_alpha(self, alpha):
+    self._mag_alpha = max(0.0, min(0.1, alpha))
+
+  # ——————————————————————————————————————————————————————————
+  #                      工具
+  # ——————————————————————————————————————————————————————————
+
+  @staticmethod
+  def _normalize_angle(a):
+    while a > 180.0: a -= 360.0
+    while a < -180.0: a += 360.0
+    return a
 
   # ——————————————————————————————————————————————————————————
   #                      原始数据
@@ -403,4 +523,5 @@ class ImuSensor:
     self._calib_gy = 0.0
     self._calib_gz = 0.0
     self._still_count = 0
+    self._gyro_yaw = 0.0
     self._calibrated = False
