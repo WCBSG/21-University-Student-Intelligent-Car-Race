@@ -6,12 +6,15 @@ AMS TCS3472XFN, I2C 7-bit addr 0x29, RGB + Clear.
 
 用法:
   from machine import I2C
-  i2c = I2C(0, freq=100000)          # 或 I2C(1/2/3), 查 E07 demo 引脚表
+  i2c = I2C(1, freq=100000)          # LPI2C2: SCL=C19, SDA=C18
   tcs = TCS3472(i2c)
   r, g, b, c = tcs.read_raw()
   if tcs.crossed_yellow():
       print("越过黄线!")
 """
+
+# 本车接线: I2C1 (LPI2C2) SCL=C19 SDA=C18
+TCS_I2C_ID = 1
 
 # TCS3472 寄存器 (CMD bit 7 = 1, auto-increment)
 _REG_ENABLE  = 0x80  # 0x00: PON(bit0) + AEN(bit1)
@@ -29,12 +32,17 @@ _REG_BDATA   = 0x9A  # 0x1A: Blue  (2B)
 _INTEGRATION_154MS = 0xC0   # 153.6ms, 推荐
 _INTEGRATION_700MS = 0x00   # 614.4ms, 弱光
 
-# 增益
+# 增益 (CONTROL AGAIN[1:0])
 _GAIN_1X  = 0x00
 _GAIN_4X  = 0x01
-_GAIN_16X = 0x10
-_GAIN_60X = 0x11
+_GAIN_16X = 0x02
+_GAIN_60X = 0x03
 
+
+def make_i2c(freq=100000):
+  """本车 TCS 专用总线: I2C1 / C19(SCL)+C18(SDA)。"""
+  from machine import I2C
+  return I2C(TCS_I2C_ID, freq=freq)
 
 class TCS3472:
   """TCS3472XFN 颜色传感器。I2C 7-bit addr = 0x29。"""
@@ -48,10 +56,13 @@ class TCS3472:
     self._yellow_count = 0
     self._inited = False
 
-    # 可调黄色阈值 — 实地标定后修改
-    self.yellow_r_min = 120   # R 通道最小值 (0-65535 raw)
-    self.yellow_g_min = 100   # G 通道最小值
-    self.yellow_b_max = 80    # B 通道最大值 (黄色 B 低)
+    # 可调黄色阈值 — 基于 Clear 归一化 (r/c, g/c, b/c)
+    # 实地标定 (I2C1): 蓝布 rn≈0.19 gn≈0.32 bn≈0.44;
+    #                   黄胶 rn≈0.37 gn≈0.39 bn≈0.16
+    self.yellow_r_min = 0.28   # R/C
+    self.yellow_g_min = 0.28   # G/C
+    self.yellow_b_max = 0.25   # B/C
+    self.yellow_c_min = 800    # Clear 过暗不判
 
     self.init()
 
@@ -101,18 +112,18 @@ class TCS3472:
 
   def is_yellow(self):
     """
-    当前读数是否为黄色（黄胶带）。
-    判据: R > threshold AND G > threshold AND B < threshold (黄 = 高R+高G+低B)
-    阈值需实地标定。蓝布上: R≈40 G≈60 B≈100; 黄胶带上: R≈200 G≈180 B≈50 (示例)
+    当前是否黄胶带。用 Clear 归一化色度，避免亮度变化误判。
+    判据: R/C、G/C 较高且 B/C 较低（黄 = 高R+高G+低B）。
     """
     r, g, b, c = self.read_raw()
-    if c < 20:
-      return False  # 太暗，无判据
-    # 归一化到 ~0-255 便于设阈值 (除以 c * 255)
-    # 也可以用绝对值，看标定结果
-    return (r > self.yellow_r_min and
-            g > self.yellow_g_min and
-            b < self.yellow_b_max)
+    if c < self.yellow_c_min:
+      return False
+    rn = r / c
+    gn = g / c
+    bn = b / c
+    return (rn >= self.yellow_r_min and
+            gn >= self.yellow_g_min and
+            bn <= self.yellow_b_max)
 
   def crossed_yellow(self):
     """
@@ -127,7 +138,7 @@ class TCS3472:
     return crossed
 
   def reset_crossed(self):
-    """复位上升沿计数（每次 SCORE 后调用）。"""
+    """复位上升沿状态（每次 SCORE 后调用）。"""
     self._prev_yellow = False
 
   @property
@@ -139,12 +150,16 @@ class TCS3472:
   # ————————————————————————————————————————————————————————
 
   def debug_print(self):
-    """打印当前 raw 值 + 黄线判据（P0 标定用）。"""
+    """打印 raw + 归一化 + 黄线判据（P0 标定用）。"""
     r, g, b, c = self.read_raw()
+    if c > 0:
+      rn, gn, bn = r / c, g / c, b / c
+    else:
+      rn = gn = bn = 0.0
     is_y = self.is_yellow()
-    print("[TCS] R=%d G=%d B=%d C=%d yellow=%s" % (r, g, b, c, is_y))
+    print("[TCS] R=%d G=%d B=%d C=%d | rn=%.2f gn=%.2f bn=%.2f yellow=%s" % (
+      r, g, b, c, rn, gn, bn, is_y))
     return (r, g, b, c, is_y)
-
   # ————————————————————————————————————————————————————————
   #                      I2C 底层
   # ————————————————————————————————————————————————————————

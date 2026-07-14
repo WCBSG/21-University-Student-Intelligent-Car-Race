@@ -7,14 +7,14 @@ Mode.update → None；转移仅由 handle / tick / on_camera_frame 发起。
 
 from app import intent as I
 from app.mode import (
-  IDLE, HDG, SEARCH, TRACK, PUSH, RETURN, COMPLETE, FAULT, ALL_STATES,
+  IDLE, HDG, SEARCH, TRACK, COMPLETE, FAULT, ALL_STATES,
   Debouncer, Mode, IdleMode,
 )
 
 
 # 再导出，供外部 from app.fsm import SEARCH 等
 __all__ = [
-  "IDLE", "HDG", "SEARCH", "TRACK", "PUSH", "RETURN", "COMPLETE", "FAULT", "ALL_STATES",
+  "IDLE", "HDG", "SEARCH", "TRACK", "COMPLETE", "FAULT", "ALL_STATES",
   "Debouncer", "Mode", "IdleMode", "RobotFSM", "build_robot",
 ]
 
@@ -32,7 +32,6 @@ _INTENT_TABLE = {
   (I.LOCK_YAW, TRACK): None,
   (I.LOCK_YAW, COMPLETE): None,
   (I.LOCK_YAW, FAULT): None,
-  (I.MATCH_START, IDLE): SEARCH,
   (I.START_TRACK, IDLE): SEARCH,
   (I.START_TRACK, HDG): SEARCH,
   (I.START_TRACK, SEARCH): None,
@@ -45,14 +44,10 @@ _INTENT_TABLE = {
   (I.STOP, TRACK): IDLE,
   (I.STOP, COMPLETE): IDLE,
   (I.STOP, FAULT): IDLE,
-  (I.STOP, PUSH): IDLE,
-  (I.STOP, RETURN): IDLE,
   (I.ABORT, IDLE): IDLE,
   (I.ABORT, HDG): IDLE,
   (I.ABORT, SEARCH): IDLE,
   (I.ABORT, TRACK): IDLE,
-  (I.ABORT, PUSH): IDLE,
-  (I.ABORT, RETURN): IDLE,
   (I.ABORT, COMPLETE): IDLE,
   (I.ABORT, FAULT): IDLE,
   (I.RECONNECT, IDLE): IDLE,
@@ -109,7 +104,7 @@ class RobotFSM:
       self.search_phase = "spin"
 
   def handle(self, intent, arg=None):
-    if intent in (I.START_TRACK, I.MATCH_START):
+    if intent == I.START_TRACK:
       if not self._imu.is_calibrated:
         return False
 
@@ -174,14 +169,6 @@ class RobotFSM:
     if self._mode is not None:
       self._mode.update(dt, sensors)
 
-    # ★ 比赛 PUSH → RETURN（推出完毕）
-    if self.state == PUSH and hasattr(self._mode, "push_done") and self._mode.push_done:
-      print("[FSM] PUSH done → RETURN")
-      self.transition(RETURN)
-
-    # ★ 比赛 RETURN → IDLE（回库完毕，暂用时间判断或手动 STOP）
-    # 当前：RETURN 持续直到用户 STOP/ABORT；后续可加触线检测自动转 IDLE
-
     # 同步显示信息
     m = self._mode
     if self.state == TRACK and hasattr(m, "target_info"):
@@ -198,10 +185,17 @@ class RobotFSM:
     """按相机帧调用（或由 tick 在 new_frame 时调用）。"""
     stop_pct = self._cfg.tracking.stop_bottom_pct
 
-    if self.state == TRACK:
+    if self.state == SEARCH:
+      self._confirm.tick(has_target)
+      if has_target and self._confirm._n > 0:
+        print("[FSM] SEARCH confirm=%d/%d" % (self._confirm._n, self._confirm._thr))
+      if self._confirm.ready():
+        self.transition(TRACK)
+
+    elif self.state == TRACK:
       if has_target and y2 >= stop_pct:
-        print("[FSM] TRACK y2=%.1f >= %.1f → PUSH" % (y2, stop_pct))
-        self.transition(PUSH)
+        print("[FSM] TRACK y2=%.1f >= %.1f → COMPLETE" % (y2, stop_pct))
+        self.transition(COMPLETE)
         return
       self._lost.tick(not has_target)
       if not has_target and self._lost._n > 0:
@@ -211,29 +205,20 @@ class RobotFSM:
         search = self._modes.get(SEARCH)
         if search is not None and hasattr(search, "begin_reverse"):
           search.begin_reverse()
+        else:
+          self.search_phase = "reverse"
         self.transition(SEARCH)
-
-    elif self.state == SEARCH:
-      self._confirm.tick(has_target)
-      if has_target and self._confirm._n > 0:
-        print("[FSM] SEARCH confirm=%d/%d" % (self._confirm._n, self._confirm._thr))
-      if self._confirm.ready():
-        self.transition(TRACK)
-
 
 
 def build_robot(arbiter, cfg, imu):
-  """工厂：注册全部 Mode（调试 + 比赛）。"""
+  """工厂：注册全部 Mode。"""
   from ctrl.heading_mode import HeadingMode
   from ctrl.track import TrackSearchMode, TrackApproachMode, CompleteMode, FaultMode
-  from ctrl.match import PushMode, ReturnMode
 
   robot = RobotFSM(arbiter, cfg, imu)
   hdg = HeadingMode(arbiter, imu, cfg)
   search = TrackSearchMode(arbiter, imu, cfg, robot)
   approach = TrackApproachMode(arbiter, imu, cfg)
-  push = PushMode(arbiter, cfg)
-  ret = ReturnMode(arbiter, imu, cfg)
   complete = CompleteMode(arbiter)
   fault = FaultMode(arbiter)
   robot.set_mode_map({
@@ -241,8 +226,6 @@ def build_robot(arbiter, cfg, imu):
     HDG: hdg,
     SEARCH: search,
     TRACK: approach,
-    PUSH: push,
-    RETURN: ret,
     COMPLETE: complete,
     FAULT: fault,
   })

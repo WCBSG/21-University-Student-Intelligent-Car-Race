@@ -553,12 +553,11 @@ def _make_heading_pid_page(hdg):
 def _make_tracker_page(tracker, camera, intents=None, robot=None):
   """视觉跟踪主页面。有 intents 时只发 Intent。"""
   from app import intent as I
-  from app.mode import IDLE, SEARCH, TRACK, PUSH, RETURN, COMPLETE, FAULT
+  from app.mode import IDLE, SEARCH, TRACK, COMPLETE, FAULT
 
   CLASS_NAMES = {7: "Any", 0: "Sandbag", 1: "Netball", 2: "Bear"}
   _STATE_MAP = {
     IDLE: "IDLE", SEARCH: "SEARCHING", TRACK: "TRACKING",
-    PUSH: "PUSHING", RETURN: "RETURNING",
     COMPLETE: "COMPLETE", FAULT: "FAULT", "HDG": "IDLE",
   }
 
@@ -639,7 +638,6 @@ def _make_tracker_page(tracker, camera, intents=None, robot=None):
                  10.0, 90.0, 5.0, persistent=True,
                  formatter=lambda v: "{:.0f} deg".format(v)),
       MenuItem("PID Tune >", action=_make_go_action(PAGE_TRACKER_PID, 0)),
-      MenuItem("★ Match GO", action=lambda m, i: intents.post(I.MATCH_START) if intents else None),
       MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 2)),
     ],
     refresh_ms=200,

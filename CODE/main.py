@@ -1,10 +1,11 @@
 """
-main.py — RT1021 智能车主程序（步 4：robot.tick 唯一控制路径）
+main.py — RT1021 智能车主程序
 
-Init 顺序刻意把「纯软件 import」放在 LCD 帧缓冲之前，避免 Menu 编译 OOM。
+Init: 软件 import → LCD → Camera → FSM → TCS → Match → Menu(可选) → Loop
+P1: MatchRunner 单件闭环；ENTER 发车，BACK 急停。
 """
 
-from machine import Pin
+from machine import Pin, UART
 from time import sleep_ms, ticks_ms, ticks_diff
 import gc
 
@@ -16,7 +17,7 @@ def _mem(tag):
   print("[MEM] %s free=%d" % (tag, gc.mem_free()))
 
 # =============================================================================
-#                               Init: Motors + Arbiter + Config + IMU
+#                               Motors + Config + IMU
 # =============================================================================
 _log("Motors...", "INIT")
 from Motor import MotionControl
@@ -37,18 +38,19 @@ _log("IMU660RX OK (calibrating...)", "INIT")
 _mem("after imu")
 
 # =============================================================================
-#                     软件模块提前 import（LCD 帧缓冲尚未分配）
+#                     软件模块提前 import（LCD 帧缓冲前）
 # =============================================================================
 _log("Imports...", "INIT")
-from Menu import MenuInit
-from app.intent import IntentQueue, ABORT, MATCH_START
-from app.fsm import build_robot
+from app.intent import IntentQueue, ABORT
+from app.fsm import build_robot, IDLE
 from link.camera_rx import CameraRx
 from ctrl.track import select_target
+from sensors.tcs3472 import TCS3472, make_i2c
+from match.runner import MatchRunner
 _mem("after imports")
 
 # =============================================================================
-#                               Init: Display（帧缓冲吃 RAM）
+#                               Display
 # =============================================================================
 _log("Display...", "INIT")
 from display import LCD_Drv, LCD
@@ -67,10 +69,9 @@ _log("Display OK", "INIT")
 _mem("after lcd")
 
 # =============================================================================
-#                               Init: Camera
+#                               Camera
 # =============================================================================
 _log("Camera UART5...", "INIT")
-from machine import UART
 cam_uart = UART(5, baudrate=460800)
 camera = CameraRx(cam_uart, timeout_ms=cfg.tracking.cam_timeout_ms)
 _log("Camera UART5 OK", "INIT")
@@ -93,22 +94,41 @@ for retry in range(1, 21):
 gc.collect()
 
 # =============================================================================
-#                               Init: FSM + Menu
+#                               FSM + TCS + Match
 # =============================================================================
 _log("FSM...", "INIT")
 intents = IntentQueue()
 robot = build_robot(arbiter, cfg, imu)
 _log("FSM OK", "INIT")
-_mem("after fsm")
 
+_log("TCS3472 I2C1...", "INIT")
+tcs = TCS3472(make_i2c())
+_log("TCS3472 OK", "INIT")
+
+_log("Match...", "INIT")
+match = MatchRunner(robot, arbiter, tcs, cfg)
+_log("Match OK", "INIT")
+_mem("after match")
+
+# =============================================================================
+#                               Menu（OOM 时跳过，用按键跑 Match）
+# =============================================================================
+menu = None
 _log("Menu...", "INIT")
 gc.collect()
-menu = MenuInit(
-  W=320, H=200, imu=imu, hdg=None, tracker=None, camera=camera,
-  intents=intents, robot=robot,
-  _lcd=_lcd, _lcd_drv=_lcd_drv,
-)
-_log("Menu OK", "INIT")
+try:
+  from Menu import MenuInit
+  menu = MenuInit(
+    W=320, H=200, imu=imu, hdg=None, tracker=None, camera=camera,
+    intents=intents, robot=robot,
+    _lcd=_lcd, _lcd_drv=_lcd_drv,
+  )
+  _log("Menu OK", "INIT")
+except MemoryError as e:
+  _log("Menu SKIPPED (MemoryError: %s)" % e, "INIT")
+  _lcd.clear(0x0000)
+  _lcd.str16(10, 40, "No Menu — ENTER=Match", 0xFFE0)
+  _lcd.str16(10, 70, "BACK=Abort", 0xFFFF)
 _mem("after menu")
 
 # =============================================================================
@@ -140,15 +160,15 @@ tkr.start(10)
 _log("Ticker OK", "INIT")
 
 _log("Init Complete", "INIT")
-_lcd.clear(0x0000)
+if menu is not None:
+  _lcd.clear(0x0000)
 sleep_ms(100)
 LED.low()
-_log("Main loop running", "Main")
+_log("Main loop — ENTER start Match, BACK abort", "Main")
 keylast = [1, 1, 1, 1]
 _last_ms = ticks_ms()
 _last_dbg_ms = ticks_ms()
 _loop_cnt = 0
-# 帧间缓存：poll() 返回 None 时保持上一帧目标，避免 SEARCH 确认期误自旋
 has_target = False
 target = None
 y2 = 0.0
@@ -164,31 +184,36 @@ while True:
   # ---- Debug Heartbeat (每 2 秒) ----
   if ticks_diff(now, _last_dbg_ms) >= 2000:
     _last_dbg_ms = now
-    st = robot.state
-    cam_ok = "cam:OK" if camera.is_ready else "cam:--"
-    if camera.is_ready:
-      cam_ok = "cam:TO" if camera.timed_out else "cam:OK"
-    tgt = "TGT" if has_target else "---"
-    mem = gc.mem_free()
-    print("[DBG] loop=%d state=%s %s %s free=%d" % (_loop_cnt, st, cam_ok, tgt, mem))
+    print("[DBG] loop=%d robot=%s match=%s free=%d" % (
+      _loop_cnt, robot.state, match.phase, gc.mem_free()))
 
-  # ---- Keys → Intent / Menu ----
+  # ---- Keys ----
   if not BACK.value() and keylast[3]:
-    intents.post(ABORT)
-    menu.handle_input('BACK')
+    if match.is_running or match.phase == "DONE":
+      match.stop()
+    else:
+      intents.post(ABORT)
+    if menu is not None:
+      menu.handle_input('BACK')
   if not UP.value() and keylast[0]:
-    menu.handle_input('UP')
+    if menu is not None:
+      menu.handle_input('UP')
   if not DOWN.value() and keylast[1]:
-    menu.handle_input('DOWN')
+    if menu is not None:
+      menu.handle_input('DOWN')
   if not ENTER.value() and keylast[2]:
-    menu.handle_input('ENTER')
+    # P1: IDLE 时 ENTER 启 Match；有 Menu 时仍可进菜单项
+    if match.phase in ("IDLE", "DONE") and robot.state == IDLE:
+      match.start()
+    elif menu is not None:
+      menu.handle_input('ENTER')
   keylast = [UP.value(), DOWN.value(), ENTER.value(), BACK.value()]
 
   # ---- drain Intent ----
   if len(intents) > 0:
     robot.drain_and_handle(intents)
 
-  # ---- RECONNECT 先于 sensors（避免本拍仍带旧 cam_timeout → 立刻再 FAULT）----
+  # ---- RECONNECT ----
   if robot.reconnect_pending:
     if camera.handshake(retries=30, retry_ms=30):
       robot.reconnect_pending = False
@@ -196,7 +221,7 @@ while True:
     else:
       robot.reconnect_pending = False
 
-  # ---- Camera → sensors（保留上一帧 target，避免帧间抖动）----
+  # ---- Camera → sensors ----
   new_frame = False
   cam_timeout = False
   if camera.is_ready:
@@ -204,8 +229,7 @@ while True:
     if frame is not None:
       new_frame = True
       has_target = frame.has_target
-      if has_target and target is None:
-        print("[CAM] frame: %d objs, has_target=%s" % (frame.num, has_target))
+      if has_target:
         target = select_target(frame.detections, cfg)
         has_target = target is not None
         if has_target:
@@ -217,13 +241,15 @@ while True:
         target = None
         y2 = 0.0
     cam_timeout = camera.timed_out
-    if cam_timeout and _loop_cnt > 10:
-      print("[CAM] TIMEOUT — no frame for %dms" % cfg.tracking.cam_timeout_ms)
   else:
     has_target = False
     target = None
     y2 = 0.0
     cam_timeout = False
+
+  # ---- TCS（每拍一次 crossed，供 Match PUSH）----
+  tcs_crossed = tcs.crossed_yellow()
+  tcs_yellow = tcs._prev_yellow
 
   sensors = {
     "new_frame": new_frame,
@@ -231,9 +257,14 @@ while True:
     "target": target,
     "y2": y2,
     "cam_timeout": cam_timeout,
+    "tcs_crossed": tcs_crossed,
+    "tcs_yellow": tcs_yellow,
   }
 
+  # ---- 控制：先 robot，再 match（PUSH 时 Match 抢 Arbiter）----
   robot.tick(dt, sensors)
+  match.tick(dt, sensors)
 
-  menu.update_display()
+  if menu is not None:
+    menu.update_display()
   sleep_ms(20)
