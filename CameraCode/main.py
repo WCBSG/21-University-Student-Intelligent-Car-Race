@@ -1,5 +1,5 @@
 """
-CameraCode/main.py — OpenART Plus 正式检测程序
+CameraCode/main.py — OpenART Plus 正式检测程序（自包含，无外部依赖）
 
 上电 → 自检(sensor+uart+model) → 等待MCU连接请求 → 握手 → 检测循环
 
@@ -33,19 +33,149 @@ CFG = {
   'baudrate': 460800,
   'img_width': 320,
   'img_height': 240,
-  'conf_min': 70,              # 最低置信度 (%)
+  'conf_min': 70,
   'send_interval_ms': 50,
   'model_path': '/sd/yolo3_iou_smartcar_final_with_post_processing.tflite',
   'class_names': ['sandbag', 'netball', 'bear'],
 }
 
-# ============================== 协议工具（共享自 link_proto）==============================
+# ============================== 协议工具（内联，无需额外部署）==============================
 
-from link_proto import (
-    calc_crc, escape, unescape,
-    write_chunked, send_frame, recv_frame, recv_frame_handshake,
-    encode_detections, parse_detections
-)
+UART_CHUNK = 60
+UART_CHUNK_DELAY = 2
+
+def calc_crc(data):
+  crc = 0
+  for b in data:
+    crc ^= b
+  return crc & 0xFF
+
+def escape(data):
+  result = bytearray()
+  for b in data:
+    if b == 0xAA:
+      result.extend(b'\xBB\x00')
+    elif b == 0xBB:
+      result.extend(b'\xBB\x01')
+    else:
+      result.append(b)
+  return bytes(result)
+
+def unescape(data):
+  result = bytearray()
+  i = 0
+  while i < len(data):
+    b = data[i]
+    if b == 0xBB and i + 1 < len(data):
+      if data[i + 1] == 0x00:
+        result.append(0xAA); i += 2; continue
+      elif data[i + 1] == 0x01:
+        result.append(0xBB); i += 2; continue
+    result.append(b); i += 1
+  return bytes(result)
+
+def write_chunked(uart, data):
+  for i in range(0, len(data), UART_CHUNK):
+    chunk = data[i:i + UART_CHUNK]
+    uart.write(chunk)
+    if i + UART_CHUNK < len(data):
+      time.sleep_ms(UART_CHUNK_DELAY)
+
+def send_frame(uart, cmd, payload=b''):
+  escaped = escape(payload)
+  length = len(escaped)
+  if length > 255:
+    return False
+  header = bytearray([0xAA, cmd, length])
+  crc = calc_crc(bytearray([cmd, length]) + escaped)
+  frame = header + escaped + bytearray([crc])
+  try:
+    write_chunked(uart, frame)
+    return True
+  except Exception:
+    return False
+
+def recv_frame(uart, timeout_ms=100):
+  if uart is None:
+    return None, None
+  n = uart.any()
+  if n < 4:
+    return None, None
+  start = time.ticks_ms()
+  while True:
+    if uart.any() > 0:
+      b = uart.read(1)
+      if b and b[0] == 0xAA:
+        break
+    if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
+      return None, None
+  buf = bytearray()
+  start = time.ticks_ms()
+  while len(buf) < 2:
+    if uart.any():
+      needed = 2 - len(buf)
+      buf.extend(uart.read(min(uart.any(), needed)))
+    if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
+      return None, None
+  cmd = buf[0]; length = buf[1]
+  need_total = 2 + length + 1
+  while len(buf) < need_total:
+    if uart.any():
+      needed = need_total - len(buf)
+      buf.extend(uart.read(min(uart.any(), needed)))
+    if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
+      return None, None
+  payload = buf[2:2 + length]
+  crc_recv = buf[2 + length]
+  crc_calc = calc_crc(bytearray([cmd, length]) + payload)
+  if crc_recv != crc_calc:
+    return None, None
+  return cmd, unescape(payload)
+
+def recv_frame_handshake(uart, timeout_ms=80):
+  t0 = time.ticks_ms()
+  while True:
+    if uart.any() > 0:
+      b = uart.read(1)
+      if b and b[0] == 0xAA:
+        break
+    if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+      return None, None
+  buf = bytearray()
+  t0 = time.ticks_ms()
+  while len(buf) < 2:
+    if uart.any():
+      needed = 2 - len(buf)
+      buf.extend(uart.read(min(uart.any(), needed)))
+    if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+      return None, None
+  cmd = buf[0]; length = buf[1]
+  need_total = 2 + length + 1
+  while len(buf) < need_total:
+    if uart.any():
+      needed = need_total - len(buf)
+      buf.extend(uart.read(min(uart.any(), needed)))
+    if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+      return None, None
+  payload = buf[2:2 + length]
+  crc_recv = buf[2 + length]
+  crc_calc = calc_crc(bytearray([cmd, length]) + payload)
+  if crc_recv != crc_calc:
+    return None, None
+  return cmd, unescape(payload)
+
+def encode_detections(objects):
+  payload = bytearray()
+  payload.append(len(objects))
+  for cls_id, score, x1, y1, x2, y2 in objects:
+    c = max(0, min(7, int(cls_id)))
+    s5 = max(0, min(31, int(score * 31 + 0.5)))
+    payload.append((c << 5) | s5)
+    payload.append(max(0, min(255, int(x1 * 255))))
+    payload.append(max(0, min(255, int(y1 * 255))))
+    payload.append(max(0, min(255, int((x2 - x1) * 255))))
+    payload.append(max(0, min(255, int((y2 - y1) * 255))))
+  return bytes(payload)
 
 
 # ============================== 自检 ==============================
@@ -179,7 +309,6 @@ def main():
       cmd, _ = recv_frame(uart, timeout_ms=1)
       if cmd == 0x01:
         print("  Received CMD 0x01 — re-handshaking")
-        # 直接发送 0x02（不 break 回连接阶段，否则外层会重新等 0x01 导致死锁）
         send_frame(uart, 0x02, status)
         # 等待 0x03 或 MCU 重发 0x01（5 秒超时，防止 UART 断开后永久卡死）
         t_rehs = time.ticks_ms()
