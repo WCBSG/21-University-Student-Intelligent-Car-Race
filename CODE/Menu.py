@@ -308,9 +308,6 @@ class Menu:
       if not self._dirty:
         return
 
-    self._last_render_ticks = now
-    self._dirty = False
-
     items = page.items
     n = len(items)
     half = (self.max_visible - 1) // 2
@@ -362,8 +359,14 @@ class Menu:
       else:
         value = focus_item.text
 
-    # 调用 DisplayDriver.render(title, items, value, edit_mode)
-    self.display(page.name, render_items, value, self.edit_mode)
+    # ★ 先绘制成功再清脏标记：避免 clear 后 OOM 导致永久黑屏
+    try:
+      self.display(page.name, render_items, value, self.edit_mode)
+      self._last_render_ticks = now
+      self._dirty = False
+    except MemoryError:
+      self._dirty = True
+      print("[Menu] render OOM, will retry")
 
 
 # =============================================================================
@@ -756,9 +759,10 @@ def MenuInit(W=320, H=200, Cx=None,
               step_angle=step_angle, max_visible=max_visible,
               base_size=base_size)
 
-  # 4. 注册页面并进入主页
+  # 4. 注册页面并进入主页（立刻画一帧，避免之后 RAM 更紧时永久黑屏）
   _register_pages(imu, hdg, tracker, camera, intents=intents, robot=robot)
   menu.goto(get_page(PAGE_MAIN))
+  menu.update_display()
 
   return menu
 

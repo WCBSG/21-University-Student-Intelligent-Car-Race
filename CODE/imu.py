@@ -1,52 +1,48 @@
 """
 imu.py — 陀螺仪姿态融合系统
 
-使用 IMU660RX (LSM6DSO 6 轴) + Madgwick AHRS 滤波获取偏航角。
+支持:
+  - IMU963RA (seekfree.IMU963RX) — 9 轴，默认；磁力计暂不参与融合
+  - IMU660RX (LSM6DSO 6 轴) — model="660"
 
-原理：
-  - Madgwick 梯度下降法融合加速度计 (重力参考) + 陀螺仪 (角速度积分)
-  - 加速度计纠正 Roll/Pitch 漂移，Yaw 无磁力计故会缓慢漂移 (约 1-3°/min)
-  - 通过启动时陀螺仪零偏标定 + 自适应增益减缓漂移
+融合: Madgwick 6 轴 AHRS（加速度钉 Roll/Pitch，Yaw 靠陀螺+零偏）
+963 加速度标称 ~52Hz、陀螺 ~208Hz；ticker 仍 100Hz 跑融合（加速度帧间复用）。
+陀螺 LSB：660=16.384，963(LSM6DSR)=14.286。
 
-用法：
-  imu = ImuSensor()
-  tkr.capture_list(imu.raw)        # 加入 ticker 自动采集
-  # 在 ticker 回调中：imu.update()  # 运行融合滤波
-  yaw = imu.get_yaw()              # 获取偏航角 [-180, 180]
-
-坐标系：
-  X = 前, Y = 左, Z = 上
-  Yaw = 绕 Z 轴旋转，0° = 初始朝向，正值 = 逆时针 (左转)
+用法:
+  imu = ImuSensor(model="963")   # 或 "660"
+  tkr.capture_list(imu.raw)
+  # ticker 回调: imu.update()
+  yaw = imu.get_yaw()
 """
 
 import math
-from time import ticks_ms, ticks_diff
-from seekfree import IMU660RX
+from seekfree import IMU660RX, IMU963RX
 
 # =============================================================================
 #                          物理量纲转换
 # =============================================================================
-
-# LSM6DSO 参数 (IMU660RX 默认配置)
-ACC_LSB_PER_G  = 4096.0    # ±8g 量程 → 4096 LSB/g
-GYRO_LSB_PER_DPS = 16.384  # ±2000dps 量程 → 16.384 LSB/(deg/s)
+# ±8g → 4096 LSB/g（两边一致）
+# 陀螺 ±2000dps 灵敏度因芯片不同：
+#   660 实测好用 16.384（ICM 系常见）
+#   963 = LSM6DSR → 70 mdps/LSB = 14.286 LSB/dps
+ACC_LSB_PER_G = 4096.0
+GYRO_LSB_660 = 16.384
+GYRO_LSB_963 = 14.286
 DEG_TO_RAD = math.pi / 180.0
 RAD_TO_DEG = 180.0 / math.pi
 
 
 def _acc_to_g(raw):
-  """加速度计原始 int → g"""
   return raw / ACC_LSB_PER_G
 
 
-def _gyro_to_radps(raw):
-  """陀螺仪原始 int → rad/s"""
-  return raw / GYRO_LSB_PER_DPS * DEG_TO_RAD
+def _gyro_to_radps(raw, lsb):
+  return raw / lsb * DEG_TO_RAD
 
 
-def _gyro_to_dps(raw):
-  """陀螺仪原始 int → deg/s"""
-  return raw / GYRO_LSB_PER_DPS
+def _gyro_to_dps(raw, lsb):
+  return raw / lsb
 
 
 # =============================================================================
@@ -220,39 +216,37 @@ class MadgwickAHRS:
 
 class ImuSensor:
   """
-  IMU660RX 陀螺仪传感器 + 姿态融合。
+  IMU + Madgwick 姿态融合。
 
-  用法：
-    imu = ImuSensor()
-    tkr.capture_list(imu.raw)   # ticker 自动采集原始数据
-    # 在 ticker 回调: imu.update()
-    yaw = imu.get_yaw()
-
-  属性：
-    raw       — IMU660RX 实例 (传给 capture_list)
-    data      — 链接缓冲区 [ax, ay, az, gx, gy, gz]
-    yaw       — 当前偏航角 (deg)
-    pitch     — 当前俯仰角 (deg)
-    roll      — 当前滚转角 (deg)
+  model:
+    "963" — IMU963RX / IMU963RA（get 含 mag，融合仍用前 6 轴）
+    "660" — IMU660RX
   """
 
-  def __init__(self, calibrate_samples=100, beta=0.05):
+  def __init__(self, calibrate_samples=100, beta=0.05, model="963"):
     """
-    参数：
-      calibrate_samples — 标定采样数 (启动时机器人须静止)
-      beta              — Madgwick 增益 (0.01~0.1)
+    calibrate_samples — 启动静止标定帧数 (~1s @100Hz)
+    beta              — Madgwick 增益 (实测 0.05 较稳)
+    model             — "963" | "660"
     """
-    # 初始化硬件
-    self.raw = IMU660RX()
-    self.data = self.raw.get()  # 链接缓冲区
+    self.model = model
+    if model == "660":
+      self.raw = IMU660RX()
+      self._gyro_lsb = GYRO_LSB_660
+    else:
+      # TYPE_RA 与 help 一致；AUTO 亦可
+      try:
+        self.raw = IMU963RX(imu_type=IMU963RX.TYPE_RA)
+      except (TypeError, AttributeError):
+        self.raw = IMU963RX()
+      self._gyro_lsb = GYRO_LSB_963
 
-    # 滤波器
+    self.data = self.raw.get()  # 链接缓冲区（963 为 9 元，660 为 6 元）
+
     self._filter = MadgwickAHRS(beta=beta, sample_freq=100.0)
 
-    # 陀螺仪零偏 (标定后填入，在线持续修正)
     self._bias = [0.0, 0.0, 0.0]
 
-    # 启动标定
     self._calib_samples = calibrate_samples
     self._calib_count = 0
     self._calib_gx = 0.0
@@ -260,36 +254,28 @@ class ImuSensor:
     self._calib_gz = 0.0
     self._calibrated = False
 
-    # ★ 双缓冲快照：ISR write → _snap[_idx]；主循环 read → _snap[1-_idx]
-    self._snap = [0.0] * 8   # 2 slots × 4 quaternion [q0,q1,q2,q3]
+    self._snap = [0.0] * 8
     self._snap_idx = 0
 
-    # 在线零偏跟踪 (EMA)
-    self._bias_alpha = 0.002   # EMA 平滑因子，~5 秒静止修正 63%
-    self._still_count = 0       # 连续静止帧计数
-    self._still_needed = 50     # 需要连续 50 帧 (0.5s) 才更新
-
-  # ——————————————————————————————————————————————————————————
-  #                      每帧更新
-  # ——————————————————————————————————————————————————————————
+    self._bias_alpha = 0.002
+    self._still_count = 0
+    self._still_needed = 50
 
   def update(self):
-    """
-    每帧 (ticker 回调) 调用。
-    读取最新数据 → 标定/滤波 → 更新姿态。
-    应在 capture_list 触发 capture() 之后调用。
-    """
-    ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw = self.data
+    """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
+    d = self.data
+    # 963: [ax,ay,az,gx,gy,gz,mx,my,mz]；660: 无 mag — 统一取前 6
+    ax_raw, ay_raw, az_raw = d[0], d[1], d[2]
+    gx_raw, gy_raw, gz_raw = d[3], d[4], d[5]
 
-    # 转换量纲
     ax = _acc_to_g(ax_raw)
     ay = _acc_to_g(ay_raw)
     az = _acc_to_g(az_raw)
-    gx = _gyro_to_radps(gx_raw)
-    gy = _gyro_to_radps(gy_raw)
-    gz = _gyro_to_radps(gz_raw)
+    lsb = self._gyro_lsb
+    gx = _gyro_to_radps(gx_raw, lsb)
+    gy = _gyro_to_radps(gy_raw, lsb)
+    gz = _gyro_to_radps(gz_raw, lsb)
 
-    # —— 标定阶段 ——————————————————————————————————————
     if not self._calibrated:
       self._calib_gx += gx
       self._calib_gy += gy
@@ -303,23 +289,19 @@ class ImuSensor:
                       self._calib_gz / n]
         self._calibrated = True
         self._filter.reset()
-      return  # 标定期间不运行滤波器
+      return
 
-    # —— 减去零偏 ——————————————————————————————————————
     gx -= self._bias[0]
     gy -= self._bias[1]
     gz -= self._bias[2]
 
-    # —— 在线零偏跟踪 (静止时 EMA 修正) ——————————————————
     gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
     acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
     is_still = (gyro_mag < 0.0175) and (abs(acc_mag - 1.0) < 0.05)
-    # 0.0175 rad/s ≈ 1.0 deg/s
 
     if is_still:
       self._still_count += 1
       if self._still_count >= self._still_needed:
-        # EMA: bias += alpha * residual (residual 即去零偏后的 g)
         a = self._bias_alpha
         self._bias[0] += a * gx
         self._bias[1] += a * gy
@@ -327,10 +309,8 @@ class ImuSensor:
     else:
       self._still_count = 0
 
-    # —— 运行 Madgwick 融合 ————————————————————————————
     self._filter.update(gx, gy, gz, ax, ay, az)
 
-    # ★ 双缓冲快照（ISR 写，主循环读）
     f = self._filter
     off = self._snap_idx * 4
     self._snap[off]     = f.q0
@@ -380,10 +360,11 @@ class ImuSensor:
     """陀螺仪 deg/s (已去零偏)。"""
     raw = self.data
     bx, by, bz = self._bias
+    lsb = self._gyro_lsb
     return (
-      _gyro_to_dps(raw[3]) - bx * RAD_TO_DEG,
-      _gyro_to_dps(raw[4]) - by * RAD_TO_DEG,
-      _gyro_to_dps(raw[5]) - bz * RAD_TO_DEG,
+      _gyro_to_dps(raw[3], lsb) - bx * RAD_TO_DEG,
+      _gyro_to_dps(raw[4], lsb) - by * RAD_TO_DEG,
+      _gyro_to_dps(raw[5], lsb) - bz * RAD_TO_DEG,
     )
 
   def get_accel_g(self):
