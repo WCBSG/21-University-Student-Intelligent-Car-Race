@@ -85,10 +85,12 @@ class RobotFSM:
   def transition(self, new_state):
     if new_state == self.state and new_state != IDLE:
       return
+    old_state = self.state
     old = self._mode
     if old is not None:
       old.exit()
       self._arb.release(old.id)
+    print("[FSM] %s → %s" % (old_state, new_state))
     self.state = new_state
     self._mode = self._modes.get(new_state)
     if self._mode is None:
@@ -184,17 +186,22 @@ class RobotFSM:
     stop_pct = self._cfg.tracking.stop_bottom_pct
 
     if self.state == SEARCH:
-      # reverse 阶段见到目标也可进 TRACK（立即，仍走 confirm 更稳）
       self._confirm.tick(has_target)
+      if has_target and self._confirm._n > 0:
+        print("[FSM] SEARCH confirm=%d/%d" % (self._confirm._n, self._confirm._thr))
       if self._confirm.ready():
         self.transition(TRACK)
 
     elif self.state == TRACK:
       if has_target and y2 >= stop_pct:
+        print("[FSM] TRACK y2=%.1f >= %.1f → COMPLETE" % (y2, stop_pct))
         self.transition(COMPLETE)
         return
       self._lost.tick(not has_target)
+      if not has_target and self._lost._n > 0:
+        print("[FSM] TRACK lost=%d/%d" % (self._lost._n, self._lost._thr))
       if self._lost.ready():
+        print("[FSM] TRACK lost confirmed → SEARCH+reverse")
         search = self._modes.get(SEARCH)
         if search is not None and hasattr(search, "begin_reverse"):
           search.begin_reverse()

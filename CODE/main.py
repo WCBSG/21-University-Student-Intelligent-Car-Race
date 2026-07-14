@@ -146,6 +146,8 @@ LED.low()
 _log("Main loop running", "Main")
 keylast = [1, 1, 1, 1]
 _last_ms = ticks_ms()
+_last_dbg_ms = ticks_ms()
+_loop_cnt = 0
 # 帧间缓存：poll() 返回 None 时保持上一帧目标，避免 SEARCH 确认期误自旋
 has_target = False
 target = None
@@ -157,6 +159,18 @@ while True:
   if dt <= 0.0 or dt > 0.5:
     dt = 0.02
   _last_ms = now
+  _loop_cnt += 1
+
+  # ---- Debug Heartbeat (每 2 秒) ----
+  if ticks_diff(now, _last_dbg_ms) >= 2000:
+    _last_dbg_ms = now
+    st = robot.state
+    cam_ok = "cam:OK" if camera.is_ready else "cam:--"
+    if camera.is_ready:
+      cam_ok = "cam:TO" if camera.timed_out else "cam:OK"
+    tgt = "TGT" if has_target else "---"
+    mem = gc.mem_free()
+    print("[DBG] loop=%d state=%s %s %s free=%d" % (_loop_cnt, st, cam_ok, tgt, mem))
 
   # ---- Keys → Intent / Menu ----
   if not BACK.value() and keylast[3]:
@@ -190,7 +204,8 @@ while True:
     if frame is not None:
       new_frame = True
       has_target = frame.has_target
-      if has_target:
+      if has_target and target is None:
+        print("[CAM] frame: %d objs, has_target=%s" % (frame.num, has_target))
         target = select_target(frame.detections, cfg)
         has_target = target is not None
         if has_target:
@@ -202,6 +217,8 @@ while True:
         target = None
         y2 = 0.0
     cam_timeout = camera.timed_out
+    if cam_timeout and _loop_cnt > 10:
+      print("[CAM] TIMEOUT — no frame for %dms" % cfg.tracking.cam_timeout_ms)
   else:
     has_target = False
     target = None
