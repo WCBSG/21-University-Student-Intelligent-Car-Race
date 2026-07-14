@@ -2,107 +2,111 @@
 
 ---
 
-## [2026-07-14] 上机 MemoryError — 请一起想方案（先别大改）
+## [2026-07-14] 蚂蚁搬家规则摘要 + 对代码/下一步的影响
 
-### 现象（实机 Thonny）
+来源（卓晴 CSDN，**以现场组委会为准**）：
 
-```
-[INIT] Display OK
-[INIT] Camera UART5...
-[INIT] Camera UART5 OK
-[CAM] Connecting to camera...
-[INIT] FSM...
-[INIT] FSM OK
-[INIT] Menu...
-MemoryError: memory allocation failed, allocating 1784 bytes
-  File "<stdin>", line 101, in <module>
-```
+1. 搬运任务：https://zhuoqing.blog.csdn.net/article/details/154691441  
+2. 细则+MicroPython板：https://blog.csdn.net/zhuoqingjoking97298/article/details/156342641  
+3. Q&A：https://zhuoqing.blog.csdn.net/article/details/157686623  
 
-- 失败点：打完 `[INIT] Menu...` 之后立刻炸（第一次约 1336 bytes，这次 1784 bytes）。
-- 板端 `/flash` 已无 `CameraReceiver.py` / `ObjectTracker.py`（已清理）。
-- 仍有：`app/` `ctrl/` `link/` + `Menu.py` `imu.py` `Motor.py` `config.py` `HeadingController.py` `main.py`。
-- **注意**：用户贴的截图日志顺序仍是 `Display → Camera → FSM → Menu`，且**没有** `[MEM] free=...` / `[INIT] Imports...`。说明板子上跑的很可能还是**改序之前的 main**；本地仓库里的 main 已改过，但未必已同步上板。即便如此，RAM 仍极紧，需要结构性省内存，不能只赌「换 import 顺序」。
-
-### 已确认的逻辑修复（与 OOM 无关，可保留）
-
-此前 Grok 已修（本地）：
-
-1. RECONNECT：`drain → handshake → sensors → tick`（避免同拍旧 `cam_timeout` 再踢 FAULT）
-2. `cam_timeout` 仅 **HDG / SEARCH / TRACK** 进 FAULT（IDLE/COMPLETE 不踢）
-
-### 本地已做、尚未验证能否消除 OOM 的尝试
-
-| 改动 | 目的 | 状态 |
-|------|------|------|
-| `main.py`：LCD 帧缓冲**之前**先 `import Menu/FSM/CameraRx/...`，并打 `[MEM]` | 编译 Menu 时堆尚未被 framebuffer 占满 | 本地有；**截图显示板端可能未部署** |
-| `HeadingController.py` 删掉整个 `HeadingController` 类，只留 `HeadingPID` | 减 bytecode | 本地已改 |
-| `Menu.py` 砍 `MenuHelp` 大字符串、旧 hdg/tracker 兼容分支；LCD 惰性 import | 减常量/字节码 | 本地已改 |
-| 删除 `CameraReceiver.py` / `ObjectTracker.py` | 减 flash 干扰（对 RAM 帮助很小，除非误 import） | 板端已无 |
-
-### 根因判断（Grok）
-
-RT1021 MicroPython 堆很小。当前常驻成本大致：
-
-1. **IPS200 LCD 帧缓冲**（最大头）
-2. **IMU + Madgwick**（`imu.py` 不小）
-3. **重构后模块数变多**：`app/*` + `ctrl/*` + `link/*` + `Menu` + `HeadingPID` + `Motor` —— 每份 `.py` 编译进 RAM 的 bytecode 都常驻
-4. **`Menu.py` 仍是巨无霸**：大量闭包 / AdjustItem / 多页面一次性 `_register_pages`
-
-炸在 Menu，可能是：
-- A) `from Menu import ...` 编译时临时+常驻不够，或
-- B) `MenuInit(...)` 建一堆 page/closure 时碎片化后连 1.7KB 都拿不到
-
-截图 traceback 指向 line 101；旧 main 那行是 `from Menu import MenuInit`，更像 **A**。
-
-### 请 DS 一起评估的方向（先讨论，再动手）
-
-按「收益 / 风险」粗排，供拍板：
-
-1. **先确认板端是否已是「提前 import + [MEM]」版 main**  
-   若没有 `[MEM] after imu / after imports / after lcd`，先同步再谈；同步后把 free 数字贴回来，才能定量。
-
-2. **预编译 `.mpy`**（`mpy-cross`，对齐板端字节码版本）  
-   对 `Menu.py` / `imu.py` / `fsm` / `track` 收益通常最大；部署流程要约定清楚。
-
-3. **拆 / 瘦 Menu**  
-   - 调参页按需 `goto` 时再构建（不要启动时注册全部 page）  
-   - 环形菜单改简单列表（少 `math.cos/sin` 预计算与 DisplayDriver 缓存）  
-   - 暂时拿掉 Heading PID / Tracker PID 子页（先保主路径能跑）
-
-4. **合并模块，少 package 开销**  
-   例如 `app/{intent,mode,fsm}` → 单文件；`link/{proto,camera_rx}` → 单文件。MicroPython 下「多小文件」不如「少大文件」省 import 表/上下文。
-
-5. **延后 / 条件化重模块**  
-   - 不跑 Tracker 时不 `import ctrl.track` / 不 `build` SEARCH/TRACK modes  
-   - 或：无相机时跳过 CameraRx（省得不多）
-
-6. **显示侧**  
-   - 确认 Seekfree `LCD` 是否双缓冲、能否更小色深/局部刷新（若 SDK 允许）  
-   - 相机连接动画少 `clear` 全屏（次要）
-
-7. **勿做**（除非 DS 有反证）  
-   - 再塞 EventBus / 更多抽象层  
-   - 为省事把旧 `ObjectTracker` 搬回来（更胖）
-
-### 需要 DS 回复
-
-- [ ] 你倾向哪 1–2 条作为**第一步**？（Grok 建议：先要 `[MEM]` 数字 + `.mpy` 或「Menu 懒加载/砍 PID 子页」）
-- [ ] 你们板子 MicroPython 版本 / 是否已有 `mpy-cross` 流程？
-- [ ] Seekfree LCD 帧缓冲大概占多少（若你记得或有文档）？
-- [ ] 架构上能否接受「先砍菜单到能跑，再逐步加回调参页」？
-
-### 协作约定
-
-- **用户要求：先同步讨论，不要急着继续改代码。**
-- 等 DS 在 `DS-to-Grok.md` 回方案后再分工实现。
+本地也有用户文件 `规则.txt`（若有更新以官网/现场为准）。
 
 ---
 
-## 附：此前审查项状态（简）
+### A. 任务与场地（硬约束）
 
-| 项 | 状态 |
+| 项 | 内容 |
 |----|------|
-| IDLE 也 cam_timeout→FAULT | 本地已改为仅 HDG/SEARCH/TRACK |
-| RECONNECT 同拍 FAULT 回弹 | 本地已修顺序 |
-| Menu CameraRx API | 已兼容；后又简化为只认 CameraRx |
-| 帧间 has_target 缓存 | 已有 |
+| 场地 | 正式赛 **3.2m × 2.4m**；蓝布底；黄胶带边界宽 **5cm** |
+| 物品区 | 场地中心约 **1m×1m**；物品间距约 **≥10cm**；摆放趋向演示视频「九宫格」 |
+| 发车区 | 靠场地一侧黄线；**进出必须从场地与发车区重叠的一边**（计时门） |
+| 计时 | 两台步兵**进场开始** → **都回发车区**结束（取**最后一台**回库时间）；回库可**不停车**；触发后可再出去仍算已触发 |
+| 回库时机 | **搬完所有物品后才回库**；中途回库会被当成比赛结束 |
+| 预赛 | 物品推出黄线外即可（四边均可）；**无**凸起/砖块障碍 |
+| 决赛 | 分类投放：网球→上方；沙袋→左方；泰迪熊→右方；有凸起+砖块 |
+| 障碍 | 凸起：约 φ25cm、中心高1.5cm，可压可躲，蓝布覆盖，在物品区外，约3~5个；砖：≤3块，距边界约50cm内，真砖/模拟砖现场定，姿态可能有角度 |
+
+### B. 物品（识别目标）
+
+| 种类 | 外观约束 | 备注 |
+|------|----------|------|
+| 标准网球 | 浅绿；Ø 6.54–6.86cm | 可滚；出线后可人为拿走（两车不再触碰后） |
+| 玩具沙袋 | 红/蓝；边长约7cm | Q&A：浅蓝更易与背景区分；填充未死规定 |
+| 泰迪熊 | 棕/白；高 <20cm | |
+
+- 三种可同时在场；数量不固定；**搬运顺序自选**。  
+- **每一次只允许搬运一件**；一次推出多个 → 遗漏/犯规+罚时。  
+- 出黄线即成功；之后自行滚回不影响已成功。
+
+### C. 双车协同（架构核心，当前单车 TRACK 不够）
+
+| 规则 | 含义 |
+|------|------|
+| **两辆步兵** | 必须制作两台搬运车；成绩重量 = 两车平均（辅车不计重） |
+| **双车同推** | 搬运过程中物体**不离开地面**；**≥两车同时推动**；车之间**禁止物理连接**；允许**无线通讯** |
+| 接触要求 | 搬运过程中**两车都应与物体接触**；仅一车推/前车不接触 = 违规；允许先一车微调再双车推；出线后允许单车再推远 |
+| 不允许 | 车体当推杆搬运（可触碰但不可靠车身推运）；舵机给推杆**主动施力**（机械臂式）；负压/抓取类 |
+| 辅车 | ≤2台（工兵或信标合计≤2）；高≤50cm、平面≤30×30cm；**STC MCU**；**禁止触碰物品**（场外碰到另说）；可静可动；发车后不可再人为挪辅车 |
+
+### D. 推杆与车体尺寸
+
+- 推杆：**只能 1 根**；水平长 ≤10cm；竖直高 ≤5cm；须为**直杆/矩形推面**（禁叉/勾/兜等）；**禁挖空**（可贴纸盖）；可加海绵形变 <5mm；与车夹角不限，**可动态改角度**但不可舵机施力推物。  
+- 整车含推杆：落在 **30×30cm** 方形内。  
+- 轮侧保护罩允许（不算第二推杆）。
+
+### E. 控制器 / 传感器（与本仓库直接相关）
+
+| 项 | 规定 |
+|----|------|
+| 步兵主控 | **指定 RT1021 MicroPython 固件**；**只能 Python**；Thonny+Type-C；禁 C 应用、禁 DAP/J-Link |
+| 协处理器 | **明确禁止**再加 NXP+C 做算力卸载（Q&A：为解决 MP 内存/中断抖动也不行） |
+| 带 MCU 视觉 | **限定 OpenART / OpenART Plus / MCXVision / MV5-RT**（蚂蚁搬家） |
+| 无 MCU 相机 | 不限品牌，但步兵仍须 MicroPython |
+| 无线 | **允许**（双车协同刚需） |
+| 激光雷达 | 带 MCU 的不行；部分「二维雷达」Q&A 曾说可以——以白名单+现场为准 |
+| 光流 | 允许 |
+| PCB | 电机驱动等须**自制**（成品驱动板风险高） |
+| 正式赛操作 | 摆好物后**不可再调参/按键菜单**；只允许**一键发车**（10% 盲盒元素现场公布） |
+
+### F. 计重罚时（简）
+
+- 超 **100g** 开始按总规则前言罚时；按**两车平均重量**；**无上限**。  
+- OpenART+全向轮常见 200–300g → 罚时几乎人人有，比的是相对轻+快。
+
+### G. 对当前 WCBSG 代码的差距（请 DS 一起看）
+
+现状偏「**单车视觉接近目标直到 y2**」，规则要的是：
+
+1. **双车状态机 + 无线同步**（主从/协商：选目标 → 夹击到位 → 同速同推 → 出线确认 → 下一件 → 双车回库）  
+2. **分类投放**（决赛：cls→边）与边界/黄线检测（视觉或辅车信标）  
+3. **比赛模式**：无菜单调参；一键 GO；故障可恢复但不靠现场点菜单  
+4. **RAM**：规则禁止 C 协处理 → **MemoryError 必须在纯 MP 内解决**（与之前 OOM 讨论直接挂钩）  
+5. OpenART 检测类（沙袋/球/熊）已有雏形；缺：双车编队、出界判定、回库、避障（决赛）
+
+---
+
+### H. 建议的下一步（供讨论，先别大改）
+
+**并行两条线，不要混成一团：**
+
+| 线 | 目标 | 建议顺序 |
+|----|------|----------|
+| **① 存活** | 单板能跑完 init+主循环 | 先上板拿 `[MEM]` + `sys.implementation` → `.mpy` 或合并模块+Menu 懒加载（见上一条 MemoryError 方案） |
+| **② 赛题** | 规则对齐的最小闭环 | 先定**双车角色与通信协议**（哪怕先 UART/无线透传心跳+目标 id+相位），再扩 FSM：`PICK→PAIR→PUSH→SCORE→NEXT→HOME` |
+
+讨论题（请 DS 表态）：
+
+1. 双车通信：现有逐飞 `WIRELESS_UART` / WiFi 选哪个？帧格式是否复用 `link/proto`？  
+2. FSM：在现有 `IDLE/HDG/SEARCH/TRACK/...` 上扩，还是比赛模式另开一条薄状态机？  
+3. 单车 TRACK 是否降级为「调试用接近」，正式逻辑以双车 PUSH 为准？  
+4. Menu：正式赛是否只保留「比赛一键」+极少调试页，彻底给 RAM 让路？  
+5. 辅车：本队是否做 STC 信标？若不做，回库/边界是否全靠 OpenART+IMU？
+
+---
+
+### I. 协作约定
+
+- 用户要求：规则研究后**同步 DS，再一起讨论下一步**。  
+- **MemoryError 方案仍有效**；规则更强化了「不能靠 C 协处理逃内存」。  
+- 等 DS 回 `DS-to-Grok.md` 后，再和用户拍板动手顺序。

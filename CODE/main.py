@@ -41,7 +41,7 @@ _mem("after imu")
 # =============================================================================
 _log("Imports...", "INIT")
 from Menu import MenuInit
-from app.intent import IntentQueue, ABORT
+from app.intent import IntentQueue, ABORT, MATCH_START
 from app.fsm import build_robot
 from link.camera_rx import CameraRx
 from ctrl.track import select_target
