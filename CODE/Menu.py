@@ -379,6 +379,7 @@ PAGE_HEADING     = 2
 PAGE_HEADING_PID = 3
 PAGE_TRACKER     = 4
 PAGE_TRACKER_PID = 5
+PAGE_MAG_CAL     = 6
 
 
 # =============================================================================
@@ -408,31 +409,57 @@ def _make_main_page():
 
 
 def _make_imu_page(imu):
-  """IMU 状态页（含实时姿态 + 角度阈值）"""
+  """IMU 状态页（含实时姿态 + 磁力计开关/标定入口）"""
   def _get_ath():  return config["angle_threshold"]
   def _set_ath(v): config["angle_threshold"] = v
 
-  # 实时姿态 (若 IMU 可用)
   if imu is not None:
-    _get_yaw   = lambda: f"Yaw:{imu.get_yaw():+.1f}"
-    _get_pitch = lambda: f"Pitch:{imu.get_pitch():+.1f}"
-    _get_roll  = lambda: f"Roll:{imu.get_roll():+.1f}"
+    def _get_yaw():
+      return "Yaw:{:+.1f}".format(imu.get_yaw())
+    def _get_pitch():
+      return "Pitch:{:+.1f}".format(imu.get_pitch())
+    def _get_roll():
+      return "Roll:{:+.1f}".format(imu.get_roll())
+    def _get_bias():
+      if not imu.is_calibrated:
+        return "Calibrating..."
+      return "G:{:.2f},{:.2f},{:.2f}".format(*imu.bias_dps)
+    def _get_mag_en():
+      return "ON" if imu.mag_enabled else "OFF"
+    def _toggle_mag(m, i):
+      imu.mag_enabled = not imu.mag_enabled
+      config.mag_enabled = imu.mag_enabled
+      save_config()
+    def _get_mag_hdg():
+      h = imu.get_mag_heading()
+      if h is None:
+        return "MagH: --"
+      return "MagH:{:+.1f}".format(h)
+    def _get_fused():
+      y, src = imu.get_fused_yaw(motor_on=False)
+      return "Fus:{:+.1f} {}".format(y, src)
+    def _get_mag_raw():
+      if imu.model != "963":
+        return "Mag: n/a (660)"
+      mx, my, mz = imu.mag_data
+      return "M:{:.0f},{:.0f},{:.0f}".format(mx, my, mz)
+    def _get_mag_off():
+      o = imu._mag_off
+      return "Off:{:.0f},{:.0f}".format(o[0], o[1])
 
     imu_items = [
       MenuItem("Yaw",   get_value=_get_yaw),
       MenuItem("Pitch", get_value=_get_pitch),
       MenuItem("Roll",  get_value=_get_roll),
+      MenuItem("Bias",  get_value=_get_bias),
+      MenuItem("Recal Gyro", action=lambda m, i: imu.recalibrate()),
+      MenuItem("Mag", get_value=_get_mag_en, action=_toggle_mag),
+      MenuItem("MagHdg", get_value=_get_mag_hdg),
+      MenuItem("Fused", get_value=_get_fused),
+      MenuItem("MagRaw", get_value=_get_mag_raw),
+      MenuItem("MagOff", get_value=_get_mag_off),
+      MenuItem("Cal Mag >", action=_make_go_action(PAGE_MAG_CAL, 0)),
     ]
-    # 若已标定显示零偏 + 手动重标定，否则显示标定进度
-    # ★ get_value 用 lambda 动态读取，避免闭包捕获启动时的冻结值
-    imu_items.append(
-      MenuItem("Bias",
-        get_value=lambda: "G:{:.2f},{:.2f},{:.2f} dps".format(*imu.bias_dps)
-          if imu.is_calibrated else "Calibrating...")
-    )
-    imu_items.append(
-      MenuItem("Recal Gyro", action=lambda m, i: imu.recalibrate())
-    )
   else:
     imu_items = [
       MenuItem("IMU not connected"),
@@ -440,7 +467,7 @@ def _make_imu_page(imu):
 
   imu_items.append(
     AdjustItem("Thresh:", _get_ath, _set_ath, 1.0, 90.0, 1.0,
-               persistent=True, formatter=lambda v: f"{v:.0f} deg")
+               persistent=True, formatter=lambda v: "{:.0f} deg".format(v))
   )
   imu_items.append(
     MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 0))
@@ -448,7 +475,62 @@ def _make_imu_page(imu):
 
   return MenuPage(
     id=PAGE_IMU, name="IMU Status", items=imu_items,
-    refresh_ms=200  # 实时数据页，每 200ms 强制刷新
+    refresh_ms=200
+  )
+
+
+def _make_mag_cal_page(imu):
+  """硬铁标定：平放慢转一圈 → Save 写 offset + config。"""
+  from imu import MagCalib
+  calib = MagCalib()
+  active = [False]
+
+  def _on_enter(menu):
+    calib.reset()
+    active[0] = True
+
+  def _on_exit(menu):
+    active[0] = False
+
+  def _status():
+    if imu is None or imu.model != "963":
+      return "Need IMU963"
+    if not active[0]:
+      return "Enter to start"
+    # 用原始值（未减 offset）
+    d = imu.data
+    calib.feed(d[6], d[7], d[8])
+    dx, dy = calib.span_xy
+    ok = "OK" if calib.ready else "spin"
+    return "{} n={} d:{:.0f}/{:.0f}".format(ok, calib.n, dx, dy)
+
+  def _save(m, i):
+    if imu is None or imu.model != "963":
+      return
+    if not calib.ready:
+      return
+    ox, oy, oz = calib.offset
+    imu.set_mag_offset(ox, oy, oz)
+    config.mag_ox = ox
+    config.mag_oy = oy
+    config.mag_oz = oz
+    save_config()
+    active[0] = False
+    m.jump_to(PAGE_IMU, 0)
+
+  def _restart(m, i):
+    calib.reset()
+    active[0] = True
+
+  items = [
+    MenuItem("Status", get_value=_status),
+    MenuItem("Save Off", action=_save),
+    MenuItem("Restart", action=_restart),
+    MenuItem("[ Back ]", action=_make_go_action(PAGE_IMU, 0)),
+  ]
+  return MenuPage(
+    id=PAGE_MAG_CAL, name="Mag Calib", items=items,
+    on_enter=_on_enter, on_exit=_on_exit, refresh_ms=100
   )
 
 
@@ -693,6 +775,7 @@ def _register_pages(imu=None, hdg=None, tracker=None, camera=None,
   """注册所有页面到全局注册表。由 MenuInit 调用。"""
   _register(_make_main_page())
   _register(_make_imu_page(imu))
+  _register(_make_mag_cal_page(imu))
 
   if hdg is not None or robot is not None:
     _register(_make_heading_page(imu, hdg, intents=intents, robot=robot))

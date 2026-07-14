@@ -53,6 +53,11 @@ class Config:
     self.heading = PidGains(kp=2.0, ki=0.0, kd=0.0, max_out=50.0, deadband=1.0)
     self.tracking_bearing = PidGains(kp=1.5, ki=0.05, kd=0.0, max_out=60.0, deadband=0.02)
     self.tracking = TrackingParams()
+    # 磁力计（963）；MATCH 默认关，标定偏移存盘复用
+    self.mag_enabled = False
+    self.mag_ox = 0.0
+    self.mag_oy = 0.0
+    self.mag_oz = 0.0
 
   # —— dict 兼容（Menu 过渡）——————————————————————————————
 
@@ -124,6 +129,10 @@ class Config:
       d[k] = self[k]
     d["trk_lost_frames"] = self.tracking.lost_frames
     d["cam_timeout_ms"] = self.tracking.cam_timeout_ms
+    d["mag_enabled"] = bool(self.mag_enabled)
+    d["mag_ox"] = float(self.mag_ox)
+    d["mag_oy"] = float(self.mag_oy)
+    d["mag_oz"] = float(self.mag_oz)
     return d
 
   def _apply_dict(self, loaded):
@@ -132,6 +141,14 @@ class Config:
         self.tracking.lost_frames = int(v)
       elif k == "cam_timeout_ms":
         self.tracking.cam_timeout_ms = int(v)
+      elif k == "mag_enabled":
+        self.mag_enabled = bool(v)
+      elif k == "mag_ox":
+        self.mag_ox = float(v)
+      elif k == "mag_oy":
+        self.mag_oy = float(v)
+      elif k == "mag_oz":
+        self.mag_oz = float(v)
       elif k in self._KEY_SET:
         self[k] = v
 

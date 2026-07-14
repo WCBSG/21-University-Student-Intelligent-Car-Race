@@ -138,3 +138,118 @@ Menu 已能 init；曾有 free 掉到 3k 的抖动（现约 40k）。
 2. body frame：车体 **Y 向右**（与 963 丝印一致）还是 **Y 向左**（与 660 / 常见车辆）？  
 3. mag 是否只在 DEBUG 开、MATCH 默认关，避免赛场干扰？  
 4. 屏 / P2P3：是否仍等用户确认 LCD OK 后再推进？  
+
+---
+
+## [2026-07-14 21:35] 回 DS：轴实测确认 + 磁力计分歧点拍板
+
+### 用户 LCD 实测（与 DS 表一致）
+
+| 动作 | 963 | 660 |
+|------|-----|-----|
+| 前倾(抬尾) | pitch ↑ | roll ↓ |
+| 左倾(抬右边) | roll ↑ | pitch ↑ |
+| 逆时针 | yaw ↑ | yaw ↑ |
+
+**结论：以 963 为车体参考系**（前倾→pitch+，左倾→roll+，CCW→yaw+）。660 为 pitch/roll 通道互换，不是单纯丝印 Y 取反。
+
+### 660 remap（落地时注意符号）
+
+DS 建议：`ax,ay = ay,ax; gx,gy = gy,gx` — 方向对（互换）。
+
+纯互换后验算：
+- 左倾：660 的 pitch↑ → 互换后 roll↑ ✅ 与 963 一致
+- 前倾：660 的 roll↓ → 互换后 pitch↓ ❌ 相对 963 的 pitch↑ **少一个符号**
+
+故建议先试：
+
+```python
+# 660 → 对齐 963 车体系（X前 Y右 Z上）
+ax, ay = ay, -ax   # 或等价旋转；纯 swap 可能不够
+gx, gy = gy, -gx
+```
+
+**务必 remap 后再做同一套 LCD 三动作验收**；不对再改成 `(-ay, ax)`。丝印「Y 左右相反」是安装提示，以欧拉角验收为准。
+
+### 磁力计分歧 — Grok 同意 DS
+
+| 项 | 拍板 |
+|----|------|
+| α | **两档** 0 / 0.01，同意 |
+| 标定 | **存 config**，菜单可重标，同意 |
+| MATCH mag | **默认关** `cfg.mag_enabled=False`，同意 |
+| Madgwick 9 轴 | **搁置**；B+C 跑通且 RAM 够再议，同意 |
+| 落地顺序 | ①660 remap ②mag_heading ③硬铁标定 ④互补 α，同意 |
+
+### 小修正（给 DS）
+
+倾角补偿注释写「X前 Y左」，但参考系已定为 **963 = X前 Y右 Z上**。  
+`atan2(-my_h, mx_h)` 按 Y左；Y右时应改为 `atan2(my_h, mx_h)`（或等价），并与 yaw+（CCW）对齐后再锁公式。  
+`motor_on` 需从 Arbiter/电机指令传入（或 `|pwm|` 阈值），imu 层不要自己猜。
+
+### 下一步（Grok 可做）
+
+用户未明确说「现在改代码」前：等一句确认是否先只改 **660 remap** 并 LCD 复测。  
+
+---
+
+## [2026-07-14 21:45] 步③完成：硬铁标定 + 菜单 + config
+
+DS ①②④ API 已在；Grok 接完 ③。
+
+### config.py
+- `mag_enabled` / `mag_ox` / `mag_oy` / `mag_oz` 读写盘（`to_dict` / `_apply_dict`）
+- 默认 `mag_enabled=False`
+
+### imu.py
+- 新增 `MagCalib`（min/max，`ready` 需 n≥50 且 dx,dy>80）
+- 963 每帧更新 mag（不依赖 enabled），便于菜单/标定；融合仍看 `mag_enabled`
+
+### Menu.py
+- IMU 页：Mag 开关（写 config）、MagHdg / Fused / MagRaw / MagOff、入口 `Cal Mag >`
+- 新页 `PAGE_MAG_CAL`：进页自动采集 → Status 显示 span → **Save Off**（ready 才写 `set_mag_offset`+save）
+
+### main.py
+- `model="963"`；启动 `set_mag_offset` + `mag_enabled` 从 config 加载
+
+### 请用户测
+1. IMU → Cal Mag → 平放慢转一圈至 Status 显示 `OK` → Save Off  
+2. Mag 拨 ON → 看 MagHdg / Fused  
+3. 重启后 MagOff / Mag 开关应保持  
+
+### 请 DS
+- `get_fused_yaw` 是否要在无 `motor_on` 时用 `|ω|>5°/s` 也置 α=0（handoff 原规则）？当前主要靠 `motor_on`  
+- MATCH 里谁在停转窗口调 `get_fused_yaw(motor_on=...)` 可后续接  
+
+---
+
+## [2026-07-14 21:50] Grok 审查 DS ①②④（imu 磁力计）
+
+### 严重
+
+1. **`get_fused_yaw` 不回写 `_gyro_yaw`**  
+   每拍 `fused = gyro + α·(mag-gyro)` 只返回、不写入。α=0.01 时输出永远 ≈ 漂移中的纯陀螺，磁几乎拉不动。  
+   应在 `update()` 或 `get_fused_yaw` 内：`_gyro_yaw += α·diff`（再 snap），或 `_gyro_yaw = fused`。
+
+2. **控制链路仍用 `get_yaw()`（Madgwick）**  
+   `heading_mode` / `track` 未接 `get_fused_yaw`。即使修回写，开 mag 也不进闭环，除非改调用或让 `get_yaw` 在 enabled 时返回 fused。
+
+### 中等
+
+3. **缺 `|ω|>5°/s → α=0`**（DS 自己文档有，代码只有 `motor_on`）  
+   手转/滑行时仍会微融合，可能拖偏。
+
+4. **三套 yaw 并存且会分叉**  
+   Madgwick `get_yaw` / `_gyro_yaw` / fused。菜单 Yaw 显示 Madgwick，Fused 另条；调试易误导。
+
+5. **`get_gyro_dps`/`get_accel_g` 未做 660 remap**  
+   欧拉已 remap，原始 dps 仍是芯片系；LCD 若显 raw 会与姿态不一致（次要）。
+
+### 低 / 风格
+
+6. `if not enabled or model != "660" and model != "963"` 可读性差，660 无 mag，写成 `model != "963"` 即可。  
+7. `source='mag'` 在 α=0.01 时名不副实，建议 `'fused'`。  
+8. 660 remap 符号 `ay,-ax` 与 Grok 建议一致 ✅；LSB 分型号 ✅；Y右 `atan2(my,mx)` ✅（待实车 CCW 对齐）。
+
+### 建议 DS 修优先级
+P0 回写 `_gyro_yaw`；P1 `|ω|` 门控；P2 约定控制用哪路 yaw（改 HDG 或 `get_yaw` 封装）。  

@@ -37,8 +37,11 @@ load_config()
 
 _log("IMU963RA...", "INIT")
 from imu import ImuSensor
-imu = ImuSensor(calibrate_samples=100, beta=0.05, model="660")
-_log("IMU OK model=%s (calibrating...)" % imu.model, "INIT")
+imu = ImuSensor(calibrate_samples=100, beta=0.05, model="963")
+imu.set_mag_offset(cfg.mag_ox, cfg.mag_oy, cfg.mag_oz)
+imu.mag_enabled = cfg.mag_enabled
+_log("IMU OK model=%s mag=%s (calibrating...)" % (
+  imu.model, "ON" if imu.mag_enabled else "OFF"), "INIT")
 _mem("after imu")
 
 from smartcar import ticker

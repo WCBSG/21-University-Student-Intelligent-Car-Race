@@ -46,6 +46,62 @@ def _gyro_to_dps(raw, lsb):
 
 
 # =============================================================================
+#                       磁力计硬铁标定 (min/max)
+# =============================================================================
+
+class MagCalib:
+  """
+  水平转圈采集 mx/my(/mz) 极值，中心即硬铁偏移。
+  菜单里反复 feed(raw)；完成后 offset → set_mag_offset + 存 config。
+  """
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.mx_min = 1e9
+    self.mx_max = -1e9
+    self.my_min = 1e9
+    self.my_max = -1e9
+    self.mz_min = 1e9
+    self.mz_max = -1e9
+    self.n = 0
+
+  def feed(self, mx, my, mz=0.0):
+    if mx < self.mx_min:
+      self.mx_min = mx
+    if mx > self.mx_max:
+      self.mx_max = mx
+    if my < self.my_min:
+      self.my_min = my
+    if my > self.my_max:
+      self.my_max = my
+    if mz < self.mz_min:
+      self.mz_min = mz
+    if mz > self.mz_max:
+      self.mz_max = mz
+    self.n += 1
+
+  @property
+  def span_xy(self):
+    return (self.mx_max - self.mx_min, self.my_max - self.my_min)
+
+  @property
+  def ready(self):
+    """水平面有足够椭圆跨度才认为转过一圈。"""
+    dx, dy = self.span_xy
+    return self.n >= 50 and dx > 80.0 and dy > 80.0
+
+  @property
+  def offset(self):
+    return (
+      (self.mx_max + self.mx_min) * 0.5,
+      (self.my_max + self.my_min) * 0.5,
+      (self.mz_max + self.mz_min) * 0.5,
+    )
+
+
+# =============================================================================
 #                       Madgwick AHRS 滤波器
 # =============================================================================
 
@@ -324,12 +380,11 @@ class ImuSensor:
 
     self._filter.update(gx, gy, gz, ax, ay, az)
 
-    # 磁力计快照 (仅 963, 硬铁校正后存)
+    # 磁力计快照 (仅 963；始终更新，便于标定/菜单；融合仍看 mag_enabled)
     if self.model == "963":
-      mx, my, mz = d[6], d[7], d[8]
-      if self._mag_enabled:
-        mx -= self._mag_off[0]; my -= self._mag_off[1]
-        self._mx = mx; self._my = my; self._mz = mz
+      self._mx = d[6] - self._mag_off[0]
+      self._my = d[7] - self._mag_off[1]
+      self._mz = d[8] - self._mag_off[2]
 
     # 纯陀螺 yaw 累积 (用于互补融合)
     self._gyro_yaw += gz * self._filter.dt * RAD_TO_DEG
@@ -415,7 +470,9 @@ class ImuSensor:
     返回 (yaw, source): source='gyro'|'mag'。
     """
     gyro = self.get_gyro_yaw()
-    if not self._mag_enabled or self.model != "660" and self.model != "963":
+    if not self._mag_enabled:
+      return gyro, "gyro"
+    if self.model not in ("660", "963"):
       return gyro, "gyro"
 
     mag = self.get_mag_heading()
