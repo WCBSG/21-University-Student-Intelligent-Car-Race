@@ -322,7 +322,9 @@ class ImuSensor:
     self._mag_alpha = 0.01         # 互补滤波系数
     self._mag_off = [0.0, 0.0, 0.0]  # 硬铁偏移
     self._mx = 0.0; self._my = 0.0; self._mz = 0.0
-    self._gyro_yaw = 0.0           # 纯陀螺累积 yaw (deg)
+    self._gyro_yaw = 0.0           # 纯陀螺累积 yaw (deg), ISR 写
+    self._fused_offset = 0.0       # mag 修正累积 (deg), 主循环写
+    self._gyro_dps = 0.0           # 陀螺模长 (deg/s), 用于 ω 门控
 
   def update(self):
     """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
@@ -365,6 +367,7 @@ class ImuSensor:
       gx, gy = gy, -gx
 
     gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+    self._gyro_dps = gyro_mag * RAD_TO_DEG  # ω 门控用
     acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
     is_still = (gyro_mag < 0.0175) and (abs(acc_mag - 1.0) < 0.05)
 
@@ -407,10 +410,17 @@ class ImuSensor:
     off = (1 - self._snap_idx) * 5
     return tuple(self._snap[off + i] for i in range(5))
 
-  def get_yaw(self):
-    """Madgwick 偏航角, deg, [-180, 180]。未标定完成返回 0。"""
+  def get_yaw(self, motor_on=False):
+    """
+    偏航角, deg, [-180, 180]。
+    mag_enabled → 互补融合; 否则 Madgwick 纯陀螺。
+    motor_on: 电机转时传 True, 跳过磁修正。
+    """
     if not self._calibrated:
       return 0.0
+    if self._mag_enabled:
+      yaw, _ = self.get_fused_yaw(motor_on=motor_on)
+      return yaw
     q0, q1, q2, q3, _ = self._read_snap()
     yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
                      1.0 - 2.0 * (q2 * q2 + q3 * q3))
@@ -466,7 +476,8 @@ class ImuSensor:
 
   def get_fused_yaw(self, motor_on=False, alpha=None):
     """
-    互补融合航向角 (deg)。motor_on 或陀螺快 → 纯陀螺; 静止/低速 → 融合磁。
+    互补融合航向角 (deg)。★ 写回 _fused_offset 使修正持续累积。
+    motor_on 或 |ω|>5°/s → α=0; 静止/低速 → α 融合磁。
     返回 (yaw, source): source='gyro'|'mag'。
     """
     gyro = self.get_gyro_yaw()
@@ -482,18 +493,19 @@ class ImuSensor:
     # 自适应 α
     if alpha is not None:
       a = alpha
-    elif motor_on:
-      a = 0.0           # 电机转 → 磁干扰，纯陀螺
+    elif motor_on or self._gyro_dps > 5.0:  # ω 门控
+      a = 0.0
     else:
-      # 用 gyro_yaw 变化率判断运动
-      a = self._mag_alpha  # 默认 0.01
+      a = self._mag_alpha
 
     if a <= 0.0:
-      return gyro, "gyro"
+      return gyro + self._fused_offset, "gyro"
 
-    # 互补: yaw → gyro + α·(mag_diff)
-    diff = self._normalize_angle(mag - gyro)
-    fused = gyro + a * diff
+    # 互补: offset += α·(mag − fused_prev)
+    prev = gyro + self._fused_offset
+    diff = self._normalize_angle(mag - prev)
+    self._fused_offset += a * diff
+    fused = gyro + self._fused_offset
     return self._normalize_angle(fused), "mag"
 
   # ——————————————————————————————————————————————————————————
@@ -506,6 +518,8 @@ class ImuSensor:
 
   @mag_enabled.setter
   def mag_enabled(self, v):
+    if not bool(v):
+      self._fused_offset = 0.0   # 关 mag 时清修正
     self._mag_enabled = bool(v)
 
   @property
@@ -534,20 +548,26 @@ class ImuSensor:
   # ——————————————————————————————————————————————————————————
 
   def get_gyro_dps(self):
-    """陀螺仪 deg/s (已去零偏)。"""
+    """陀螺仪 deg/s (已去零偏, 660 已 remap)。"""
     raw = self.data
     bx, by, bz = self._bias
     lsb = self._gyro_lsb
-    return (
-      _gyro_to_dps(raw[3], lsb) - bx * RAD_TO_DEG,
-      _gyro_to_dps(raw[4], lsb) - by * RAD_TO_DEG,
-      _gyro_to_dps(raw[5], lsb) - bz * RAD_TO_DEG,
-    )
+    gx = _gyro_to_dps(raw[3], lsb) - bx * RAD_TO_DEG
+    gy = _gyro_to_dps(raw[4], lsb) - by * RAD_TO_DEG
+    gz = _gyro_to_dps(raw[5], lsb) - bz * RAD_TO_DEG
+    if self.model == "660":
+      gx, gy = gy, -gx  # 同 update() remap
+    return (gx, gy, gz)
 
   def get_accel_g(self):
-    """加速度计 g 值。"""
+    """加速度计 g 值 (660 已 remap)。"""
     raw = self.data
-    return (_acc_to_g(raw[0]), _acc_to_g(raw[1]), _acc_to_g(raw[2]))
+    ax = _acc_to_g(raw[0])
+    ay = _acc_to_g(raw[1])
+    az = _acc_to_g(raw[2])
+    if self.model == "660":
+      ax, ay = ay, -ax  # 同 update() remap
+    return (ax, ay, az)
 
   @property
   def is_calibrated(self):
@@ -581,4 +601,5 @@ class ImuSensor:
     self._calib_gz = 0.0
     self._still_count = 0
     self._gyro_yaw = 0.0
+    self._fused_offset = 0.0
     self._calibrated = False
