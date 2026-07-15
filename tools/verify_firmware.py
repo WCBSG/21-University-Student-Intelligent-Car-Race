@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""PC-side syntax and source/flash safety checks."""
+
+import ast
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CODE = ROOT / "CODE"
+FLASH = CODE / ".flash"
+RESULT = Path(__file__).with_suffix(".result.txt")
+
+MODULES = (
+  "main.py",
+  "runner.py",
+  "fsm.py",
+  "ctrl.py",
+  "camera.py",
+  "config.py",
+  "tcs3472.py",
+  "imu.py",
+  "Motor.py",
+)
+
+REQUIRED_RUNNER_TEXT = (
+  "rot = self._hdg_pid.update(err, dt)",
+  "PUSH timeout %dms — NOT scored",
+  'self._fault("HOME timeout — gate not confirmed")',
+  'self._sub = "CLEAR"',
+)
+
+
+def main():
+  errors = []
+
+  for root in (CODE, FLASH):
+    for name in MODULES:
+      path = root / name
+      try:
+        ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+      except Exception as exc:
+        errors.append("%s: %s" % (path.relative_to(ROOT), exc))
+
+  for path in (CODE / "config.json", FLASH / "config.json"):
+    try:
+      data = json.loads(path.read_text(encoding="utf-8"))
+      if int(data.get("清线时间", -1)) < 0:
+        errors.append("%s: invalid 清线时间" % path.relative_to(ROOT))
+    except Exception as exc:
+      errors.append("%s: %s" % (path.relative_to(ROOT), exc))
+
+  for path in (CODE / "runner.py", FLASH / "runner.py"):
+    try:
+      text = path.read_text(encoding="utf-8")
+      for required in REQUIRED_RUNNER_TEXT:
+        if required not in text:
+          errors.append("%s: missing %r" % (path.relative_to(ROOT), required))
+    except Exception as exc:
+      errors.append("%s: %s" % (path.relative_to(ROOT), exc))
+
+  lines = ["FAIL" if errors else "PASS"]
+  lines.extend(errors)
+  result = "\n".join(lines) + "\n"
+  RESULT.write_text(result, encoding="utf-8")
+  print(result, end="")
+  return 1 if errors else 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

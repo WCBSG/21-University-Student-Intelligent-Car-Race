@@ -1,334 +1,196 @@
 """
-main.py — RT1021 智能车主程序
+main.py — 纯比赛固件（无 Menu / 无 LCD）
 
-DEBUG: 先 import Menu，再开 LCD，最后才建 TCS/Match（避免 Menu OOM）
-MATCH: 无屏无 Menu；上电按住 C20≥1s 或 boot 文件
+上电：Motors → Config → IMU → Camera → TCS → FSM → Match
+等待 IMU 标定 + 相机握手完成后串口提示 READY
+短按 C20：发车 / 急停 / DONE 后再开一局
+状态全部 print 到串口
 """
 
 from machine import Pin, UART
 from time import sleep_ms, ticks_ms, ticks_diff
 import gc
 
-def _log(msg, tag):
+LED = Pin('C4', Pin.OUT, pull=Pin.PULL_UP_47K, value=True)
+C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
+
+
+def _log(msg, tag="MAIN"):
   print("[%s] %s" % (tag, msg))
+
 
 def _mem(tag):
   gc.collect()
   print("[MEM] %s free=%d" % (tag, gc.mem_free()))
 
-# =============================================================================
-LED = Pin('C4', Pin.OUT, pull=Pin.PULL_UP_47K, value=True)
-C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
-
-from boot_mode import resolve_boot_mode, request_reboot, clear_boot_file
-BOOT_MODE = resolve_boot_mode(C20, hold_ms=1000)
-_log("Boot mode: %s (C20=%d)" % (BOOT_MODE, C20.value()), "INIT")
 
 # =============================================================================
-_log("Motors...", "INIT")
+#                              硬件 / 模块初始化
+# =============================================================================
+_log("Motors...")
 from Motor import MotionControl
 motors = MotionControl()
-from ctrl.arbiter import MotorArbiter
+from ctrl import MotorArbiter
 arbiter = MotorArbiter(motors)
 
-_log("Config...", "INIT")
+_log("Config...")
 from config import config as cfg, load_config
 load_config()
 
-_log("IMU963RA...", "INIT")
+_log("IMU963...")
 from imu import ImuSensor
 imu = ImuSensor(calibrate_samples=100, beta=0.05, model="963")
 imu.set_mag_offset(cfg.mag_ox, cfg.mag_oy, cfg.mag_oz)
 imu.mag_enabled = cfg.mag_enabled
-_log("IMU OK model=%s mag=%s (calibrating...)" % (
-  imu.model, "ON" if imu.mag_enabled else "OFF"), "INIT")
-_mem("after imu")
+_log("IMU model=%s mag=%s calibrating..." % (
+  imu.model, "ON" if imu.mag_enabled else "OFF"), "IMU")
+_mem("imu")
 
 from smartcar import ticker
-tickCount = 0
+_tick_n = 0
 
-def onTick(_):
-  global tickCount
-  tickCount += 1
+
+def _on_tick(_):
+  global _tick_n
+  _tick_n += 1
   imu.update()
-  if tickCount >= 100:
-    tickCount = 0
+  if _tick_n >= 100:
+    _tick_n = 0
     gc.collect()
+
 
 tkr = ticker(1)
 tkr.capture_list(imu.raw)
-tkr.callback(onTick)
+tkr.callback(_on_tick)
 tkr.start(10)
 
-has_target = False
-target = None
-y2 = 0.0
-tcs = None
-match = None
-match_holder = [None]  # 可变容器: 先建 Menu 页后注入 MatchRunner
-camera = None
-robot = None
+_log("Camera UART5...")
+from camera import CameraRx
+from ctrl import select_target
+camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking.cam_timeout_ms)
+
+_log("TCS...")
+from tcs3472 import TCS3472, make_i2c
+tcs = TCS3472(make_i2c())
+
+_log("FSM + Match...")
+from fsm import build_robot
+from runner import MatchRunner
+robot = build_robot(arbiter, cfg, imu)
+match = MatchRunner(robot, arbiter, tcs, cfg)
+_mem("ready")
+
+# =============================================================================
+#                              传感器打包
+# =============================================================================
+_has_target = False
+_target = None
+_y2 = 0.0
+_filt_ms = 0
+
 
 def _build_sensors():
-  global has_target, target, y2
+  global _has_target, _target, _y2, _filt_ms
   new_frame = False
   cam_timeout = False
-  if camera is not None and camera.is_ready:
+  if camera.is_ready:
     frame = camera.poll()
     if frame is not None:
       new_frame = True
       raw_n = frame.num
-      has_target = frame.has_target
-      if has_target:
-        target = select_target(frame.detections, cfg)
-        has_target = target is not None
-        if has_target:
-          y2 = target[9]
+      _has_target = frame.has_target
+      if _has_target:
+        _target = select_target(frame.detections, cfg)
+        _has_target = _target is not None
+        if _has_target:
+          _y2 = _target[9]
         else:
-          # Cam 有框但被类别/置信度滤掉 → 场上常见「看得见却不理」
-          target = None
-          y2 = 0.0
-          if raw_n > 0:
+          _target = None
+          _y2 = 0.0
+          now = ticks_ms()
+          if raw_n > 0 and ticks_diff(now, _filt_ms) > 1000:
+            _filt_ms = now
             d0 = frame.detections[0]
-            print("[CAM] filtered n=%d eg cls=%d sc=%d want=%s allow=%s" % (
+            print("[CAM] filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
               raw_n, int(d0[0]), int(d0[1]),
               cfg.tracking.target_class, getattr(cfg, "match_allow", None)))
       else:
-        target = None
-        y2 = 0.0
+        _target = None
+        _y2 = 0.0
     cam_timeout = camera.timed_out
   else:
-    has_target = False
-    target = None
-    y2 = 0.0
-    cam_timeout = False
+    _has_target = False
+    _target = None
+    _y2 = 0.0
 
-  tcs_crossed = False
-  tcs_yellow = False
-  tcs_on_line = False
+  crossed = False
+  on_line = False
   if tcs is not None:
-    tcs_crossed = tcs.crossed_yellow()
-    tcs_on_line = tcs.on_line
-    tcs_yellow = tcs_on_line
+    crossed = tcs.crossed_yellow()
+    on_line = tcs.on_line
 
   return {
     "new_frame": new_frame,
-    "has_target": has_target,
-    "target": target,
-    "y2": y2,
+    "has_target": _has_target,
+    "target": _target,
+    "y2": _y2,
     "cam_timeout": cam_timeout,
-    "tcs_crossed": tcs_crossed,
-    "tcs_yellow": tcs_yellow,
-    "tcs_on_line": tcs_on_line,
+    "tcs_crossed": crossed,
+    "tcs_yellow": on_line,
+    "tcs_on_line": on_line,
   }
 
-# =============================================================================
-#                      MATCH（无 Menu / 无 LCD）
-# =============================================================================
-if BOOT_MODE == "MATCH":
-  from app.fsm import build_robot
-  from link.camera_rx import CameraRx
-  from ctrl.track import select_target
-  from sensors.tcs3472 import TCS3472, make_i2c
-  from match.runner import MatchRunner
-
-  camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking.cam_timeout_ms)
-  tcs = TCS3472(make_i2c())
-  robot = build_robot(arbiter, cfg, imu)
-  match = MatchRunner(robot, arbiter, tcs, cfg)
-  match_holder[0] = match
-  _log("MATCH profile", "MATCH")
-
-  M_WAIT_CALIB, M_WAIT_CAM, M_READY, M_RUN, M_DONE = 0, 1, 2, 3, 4
-  mphase = M_WAIT_CALIB
-  mphase_ms = ticks_ms()
-  ready_countdown = 3
-  c20_last = 1
-  c20_down_ms = 0
-
-  while C20.value() == 0:
-    sleep_ms(20)
-  c20_last = 1
-  c20_armed = True
-
-  LED.low()
-  _last_ms = ticks_ms()
-  _loop = 0
-
-  while True:
-    now = ticks_ms()
-    dt = ticks_diff(now, _last_ms) / 1000.0
-    if dt <= 0.0 or dt > 0.5:
-      dt = 0.02
-    _last_ms = now
-    _loop += 1
-
-    c20_now = C20.value()
-    if c20_armed:
-      if not c20_now and c20_last:
-        c20_down_ms = now
-      elif not c20_now and c20_down_ms:
-        if mphase == M_DONE and ticks_diff(now, c20_down_ms) >= 2000:
-          request_reboot("DEBUG")
-      elif c20_now and not c20_last and c20_down_ms:
-        held = ticks_diff(now, c20_down_ms)
-        if mphase == M_RUN and held < 2000:
-          match.stop()
-          mphase = M_DONE
-          mphase_ms = now
-        elif mphase == M_DONE and held < 2000:
-          if match.start():
-            mphase = M_RUN
-            mphase_ms = now
-        c20_down_ms = 0
-    c20_last = c20_now
-
-    if mphase == M_WAIT_CALIB:
-      LED.value(0 if (now % 400) < 200 else 1)
-      if imu.is_calibrated:
-        mphase = M_WAIT_CAM
-        mphase_ms = now
-        _log("Calibrated → handshake...", "MATCH")
-    elif mphase == M_WAIT_CAM:
-      LED.value(0 if (now % 1000) < 500 else 1)
-      if camera.handshake(retries=1, retry_ms=50):
-        camera.set_ready()
-        mphase = M_READY
-        mphase_ms = now
-        ready_countdown = 3
-        _log("Camera OK → READY", "MATCH")
-    elif mphase == M_READY:
-      LED.value(0)
-      elapsed = ticks_diff(now, mphase_ms) / 1000.0
-      countdown = max(0, 3 - int(elapsed))
-      if countdown != ready_countdown and countdown > 0:
-        ready_countdown = countdown
-        _log("%d..." % countdown, "MATCH")
-      if elapsed >= 3.0:
-        match.start()
-        mphase = M_RUN
-        _log("GO!", "MATCH")
-    elif mphase == M_RUN:
-      LED.value(0)
-      if not match.is_running and match.phase == "DONE":
-        mphase = M_DONE
-        mphase_ms = now
-        _log("DONE scored=%d" % match.scored_count, "MATCH")
-    elif mphase == M_DONE:
-      cycle = (now - mphase_ms) % 1200
-      LED.value(0 if (cycle < 150 or (300 < cycle < 450) or (600 < cycle < 750)) else 1)
-
-    sensors = _build_sensors()
-    imu._motor_on = arbiter.motors_active  # |duty|>1；停转[0,0,0] 可开 mag
-    robot.tick(dt, sensors)
-    match.tick(dt, sensors)
-    if _loop % 100 == 0:
-      print("[MATCH] phase=%d free=%d" % (mphase, gc.mem_free()))
-    sleep_ms(20)
 
 # =============================================================================
-#                      DEBUG：先编译 Menu，再开 LCD，最后 TCS/Match
+#                              启动等待：标定 + 握手
 # =============================================================================
-_log("DEBUG profile", "INIT")
+# 等松开上电时可能按住的 C20
+while C20.value() == 0:
+  sleep_ms(20)
 
-_log("Import Menu (before LCD)...", "INIT")
-gc.collect()
-from Menu import MenuInit
-from app.intent import IntentQueue, ABORT
-from app.fsm import build_robot, IDLE
-from link.camera_rx import CameraRx
-from ctrl.track import select_target
-_mem("after Menu import")
+_log("Wait IMU calib...", "BOOT")
+LED.high()
+while not imu.is_calibrated:
+  LED.value(0 if (ticks_ms() % 400) < 200 else 1)
+  sleep_ms(20)
+LED.low()
+_log("IMU calibrated yaw=%.1f" % imu.get_yaw(), "BOOT")
 
-intents = IntentQueue()
-
-_log("Display...", "INIT")
-from display import LCD_Drv, LCD
-# IPS200：CS 必须先脉冲一次并保持低，否则屏不亮/无显示（见 E5_01 例程）
-_cs  = Pin('B29', Pin.OUT, value=True)
-_cs.high()
-_cs.low()
-_dc  = Pin('B5',  Pin.OUT, value=True)
-_rst = Pin('B31', Pin.OUT, value=True)
-_blk = Pin('C21', Pin.OUT, value=True)  # 背光开
-_lcd_drv = LCD_Drv(SPI_INDEX=2, BAUDRATE=60000000,
-                   DC_PIN=_dc, RST_PIN=_rst, LCD_TYPE=LCD_Drv.LCD200_TYPE)
-_lcd = LCD(_lcd_drv)
-_lcd.mode(1)
-_lcd.color(0xFFFF, 0x0000)
-_lcd.clear(0x0000)
-_lcd.str24(40, 80, "LCD OK", 0x07E0)
-_mem("after lcd")
-
-camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking.cam_timeout_ms)
-sleep_ms(500)
-_log("Connecting to camera...", "CAM")
-_dots = ["", ".", "..", "..."]
-for retry in range(1, 21):
-  _lcd.clear(0x0000)
-  _lcd.str24(20, 40, "Wait Camera Connect" + _dots[(retry - 1) % 4], 0xFFFF)
-  _lcd.str24(60, 80, str(retry) + "/20", 0x07E0)
-  if camera.handshake(retries=1, retry_ms=100):
-    _log("Connected after %d retries" % retry, "CAM")
+_log("Camera handshake...", "BOOT")
+_hs = False
+for retry in range(1, 41):
+  LED.value(0 if (ticks_ms() % 1000) < 500 else 1)
+  if camera.handshake(retries=1, retry_ms=80):
+    camera.set_ready()
+    _hs = True
+    _log("Camera OK (try %d)" % retry, "BOOT")
     break
   if camera.failed:
-    _log("Camera self-test FAILED", "CAM")
+    _log("Camera self-test FAIL", "BOOT")
     break
+  sleep_ms(50)
+if not _hs:
+  _log("Camera handshake TIMEOUT — start is locked", "BOOT")
 else:
-  _log("Camera handshake TIMEOUT", "CAM")
-gc.collect()
+  camera.set_ready()
 
-robot = build_robot(arbiter, cfg, imu)
-_mem("after fsm")
-
-menu = None
-_log("MenuInit...", "INIT")
-gc.collect()
-try:
-  menu = MenuInit(
-    W=320, H=200, imu=imu, hdg=None, tracker=None, camera=camera,
-    intents=intents, robot=robot, match_holder=match_holder,
-    _lcd=_lcd, _lcd_drv=_lcd_drv,
-  )
-  _log("Menu OK", "INIT")
-except MemoryError as e:
-  _log("MenuInit MemoryError: %s" % e, "INIT")
-  _lcd.clear(0x0000)
-  _lcd.str16(10, 40, "Menu OOM — ENTER=Match", 0xFFE0)
-  _lcd.str16(10, 70, "C20 hold2s=MATCH", 0xFFFF)
-_mem("after menu")
-
-# Menu 起来后再加载 TCS / Match（省编译期峰值）
-_log("TCS+Match...", "INIT")
-gc.collect()
-from sensors.tcs3472 import TCS3472, make_i2c
-from match.runner import MatchRunner
-tcs = TCS3472(make_i2c())
-match = MatchRunner(robot, arbiter, tcs, cfg)
-match_holder[0] = match
-_mem("after tcs+match")
-
-UP = Pin('C8', Pin.IN, pull=Pin.PULL_UP_47K)
-DOWN = Pin('C9', Pin.IN, pull=Pin.PULL_UP_47K)
-ENTER = Pin('C14', Pin.IN, pull=Pin.PULL_UP_47K)
-BACK = Pin('C15', Pin.IN, pull=Pin.PULL_UP_47K)
-
-# TCS/Match 占 RAM 后再强制刷一帧（避免 clear 后未画完导致黑屏）
-if menu is not None:
-  gc.collect()
-  menu._dirty = True
-  menu.update_display()
-sleep_ms(100)
 LED.low()
-_log("Main loop running", "Main")
+_log("======== READY: short-press C20 to START ========", "BOOT")
+_log("layout=%d N=%d duty=%.0f" % (
+  cfg.start_layout, cfg.match_target_count, cfg.drive_duty), "BOOT")
+_mem("loop")
 
-keylast = [1, 1, 1, 1]
-c20_press_ms = 0
+# =============================================================================
+#                              主循环
+# =============================================================================
+# 相位: IDLE(等C20) | RUN | DONE
+phase = "IDLE"
 c20_last = 1
-c20_fired = False
+c20_down_ms = 0
 _last_ms = ticks_ms()
-_last_dbg_ms = ticks_ms()
-_loop_cnt = 0
+_last_stat_ms = ticks_ms()
+_loop = 0
+_last_match_phase = ""
 
 while True:
   now = ticks_ms()
@@ -336,60 +198,60 @@ while True:
   if dt <= 0.0 or dt > 0.5:
     dt = 0.02
   _last_ms = now
-  _loop_cnt += 1
+  _loop += 1
 
-  # -- C20 长按 2s → MATCH --
+  # —— C20：按下沿记时，松开边沿触发 ——
   c20_now = C20.value()
   if not c20_now and c20_last:
-    c20_press_ms = now
-    c20_fired = False
-  elif not c20_now:
-    if (not c20_fired) and ticks_diff(now, c20_press_ms) >= 2000:
-      c20_fired = True
-      request_reboot("MATCH")
-  elif c20_now:
-    c20_press_ms = 0
-    c20_fired = False
+    c20_down_ms = now
+  elif c20_now and not c20_last and c20_down_ms:
+    held = ticks_diff(now, c20_down_ms)
+    if held < 2000:
+      if phase == "RUN":
+        match.stop()
+        phase = "IDLE"
+        _log("ABORT by C20 → IDLE", "MATCH")
+      elif phase in ("IDLE", "DONE"):
+        if camera.failed:
+          _log("Camera FAILED — cannot start", "MATCH")
+        elif not camera.is_ready:
+          _log("Camera not ready — cannot start", "MATCH")
+        elif match.start():
+          phase = "RUN"
+          _log("GO! scored reset", "MATCH")
+        else:
+          _log("start refused phase=%s" % match.phase, "MATCH")
+    c20_down_ms = 0
   c20_last = c20_now
 
-  if ticks_diff(now, _last_dbg_ms) >= 2000:
-    _last_dbg_ms = now
-    print("[DBG] loop=%d robot=%s match=%s menu=%s free=%d" % (
-      _loop_cnt, robot.state, match.phase, menu is not None, gc.mem_free()))
-
-  if not BACK.value() and keylast[3]:
-    if match.is_running or match.phase == "DONE":
-      match.stop()
-    else:
-      intents.post(ABORT)
-    if menu is not None:
-      menu.handle_input('BACK')
-  if not UP.value() and keylast[0] and menu is not None:
-    menu.handle_input('UP')
-  if not DOWN.value() and keylast[1] and menu is not None:
-    menu.handle_input('DOWN')
-  if not ENTER.value() and keylast[2]:
-    if match.phase in ("IDLE", "DONE") and robot.state == IDLE and menu is None:
-      match.start()
-    elif menu is not None:
-      menu.handle_input('ENTER')
-  keylast = [UP.value(), DOWN.value(), ENTER.value(), BACK.value()]
-
-  if len(intents) > 0:
-    robot.drain_and_handle(intents)
-
-  if robot.reconnect_pending:
-    if camera.handshake(retries=30, retry_ms=30):
-      robot.reconnect_pending = False
-      camera.set_ready()
-    else:
-      robot.reconnect_pending = False
-
+  # —— 业务 ——
   sensors = _build_sensors()
-  imu._motor_on = arbiter.motors_active  # |duty|>1；停转可开 mag
+  imu._motor_on = arbiter.motors_active
   robot.tick(dt, sensors)
   match.tick(dt, sensors)
 
-  if menu is not None:
-    menu.update_display()
+  if phase == "RUN":
+    LED.low()
+    if match.phase != _last_match_phase:
+      _last_match_phase = match.phase
+      _log("%s robot=%s scored=%d" % (
+        match.info, robot.state, match.scored_count), "MATCH")
+    if not match.is_running and match.phase == "DONE":
+      phase = "DONE"
+      _log("DONE scored=%d — C20 to run again" % match.scored_count, "MATCH")
+  elif phase == "DONE":
+    # 闪烁提示完赛
+    LED.value(0 if ((now // 150) % 8) < 3 else 1)
+  else:
+    # IDLE 慢闪：可发车
+    LED.value(0 if (now % 1000) < 50 else 1)
+
+  if ticks_diff(now, _last_stat_ms) >= 2000:
+    _last_stat_ms = now
+    yaw = imu.get_yaw()
+    ht = "Y" if sensors.get("has_target") else "N"
+    yl = "Y" if sensors.get("tcs_on_line") else "N"
+    print("[STAT] %s match=%s robot=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
+      phase, match.info, robot.state, yaw, ht, yl, gc.mem_free()))
+
   sleep_ms(20)

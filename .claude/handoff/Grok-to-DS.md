@@ -28,6 +28,6 @@
 
 `CameraCode/main.py`：label 兜底、Top‑5、发送失败重试。
 
-### Config 精简（同日）
+### 纯比赛固件（2026-07-15）
 
-合并：`drive_duty`（原 leave+spin）、`drive_timeout_ms`（原 leave+next_drive）、`hdg_off[]`+`match_order`（原 cls_*+hdg_off_*）。删除未用 `angle_threshold`。旧 json 键仍可迁移加载。
+`main.py` 已去掉 Menu/LCD/四键/DEBUG 剖面。上电自动 init → READY → **短按 C20 发车**；再短按急停；DONE 后再按重开。状态 `[BOOT]/[MATCH]/[STAT]` 打串口。

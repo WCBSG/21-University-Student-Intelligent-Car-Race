@@ -218,7 +218,8 @@ def process_tree(src_root, dst_root):
                 except Exception as e:
                     n_err += 1
                     print("[ERR] %s: %s" % (src_path, e))
-            # .json / .md / .txt 等不复制
+            elif name.endswith(".json"):
+                shutil.copy2(src_path, dst_path)
 
     return n_py, n_skip, n_err, bytes_in, bytes_out
 
