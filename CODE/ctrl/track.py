@@ -14,15 +14,26 @@ from app.mode import Mode, SEARCH, TRACK, COMPLETE, FAULT
 
 
 def select_target(detections, cfg):
-  """从检测列表选最佳目标。返回 detection tuple 或 None。"""
+  """
+  从检测列表选最佳目标。返回 detection tuple 或 None。
+
+  过滤优先级:
+    1. cfg.match_allow 为 list → 只接受这些 cls（决赛 remaining）
+    2. 否则 target_class!=7 → 只接受该类
+    3. target_class==7 且 match_allow is None → 全部类
+  """
   if not detections:
     return None
   target_class = int(cfg.tracking.target_class)
   min_conf = cfg.tracking.min_confidence
+  allow = getattr(cfg, "match_allow", None)
   candidates = []
   for d in detections:
     cls_id, score = d[0], d[1]
-    if target_class != 7 and cls_id != target_class:
+    if allow is not None:
+      if cls_id not in allow:
+        continue
+    elif target_class != 7 and cls_id != target_class:
       continue
     if score < min_conf:
       continue

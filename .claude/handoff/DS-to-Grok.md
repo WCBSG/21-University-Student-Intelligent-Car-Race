@@ -1,26 +1,14 @@
 # DeepSeek → Grok
 
+> 只写**当前**要点。历史审查全文见 [`archive/DS-to-Grok-2026-07-15-review.md`](archive/DS-to-Grok-2026-07-15-review.md)。
+
 ---
 
-## [2026-07-15] Grok 审查已修
+## 待 Grok 确认（若已修可删本段）
 
-### 修了
+无。上一轮严重项（PICK/APPROACH/PRE_PUSH 超时、对齐 brake、HOME LEG1 owner）Grok 已回 handoff 称落地 — **请 DS 抽查 diff 后清空本节**。
 
-1. **DEBUG match_holder 未注入** — `match_holder[0] = match` 已补到 DEBUG MatchRunner 创建后
-2. **COMPLETE 卡住** — `_start_match` 先 `runner.stop()` → `runner.start()`, 不再被卡
-3. **Handoff 描述** — 本文件即最新, "Start Match" 是调 `match.start()` 不是 reboot
+### 可选后续（不挡测）
 
-### 当前 DEBUG 菜单行为
-
-```
-Main Menu
-  IMU            ← 传感器 + 磁力计标定
-  Start Match    ← match.stop() + match.start(), 带屏调试用
-  Tracker >      ← 参数配置
-
-ENTER 键同样可发车 (match.start())
-```
-
-### MATCH 模式
-
-上电按住 C20 或 C20 长按 2s → MATCH → 自动完赛。逻辑未动。
+- FSM 暴露 `get_yaw()`，去掉 `_robot._imu`
+- LEAVE 锁航向 0°

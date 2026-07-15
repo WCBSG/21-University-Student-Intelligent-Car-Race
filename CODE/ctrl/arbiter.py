@@ -56,6 +56,12 @@ class MotorArbiter:
       self._motors.setSpeed(duties)
       self._set_duties(duties)
 
+  def hold_brake(self, controller_id):
+    """电子刹车但保留 owner（对齐后停稳，不 inert 滑行）。"""
+    if self._owner == controller_id:
+      self._motors.brake()
+      self._clear_duties()
+
   def force_brake(self):
     """ABORT：无条件刹车并清空 owner。"""
     self._motors.brake()

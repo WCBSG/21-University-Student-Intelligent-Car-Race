@@ -77,6 +77,7 @@ def _build_sensors():
     frame = camera.poll()
     if frame is not None:
       new_frame = True
+      raw_n = frame.num
       has_target = frame.has_target
       if has_target:
         target = select_target(frame.detections, cfg)
@@ -84,8 +85,14 @@ def _build_sensors():
         if has_target:
           y2 = target[9]
         else:
+          # Cam 有框但被类别/置信度滤掉 → 场上常见「看得见却不理」
           target = None
           y2 = 0.0
+          if raw_n > 0:
+            d0 = frame.detections[0]
+            print("[CAM] filtered n=%d eg cls=%d sc=%d want=%s allow=%s" % (
+              raw_n, int(d0[0]), int(d0[1]),
+              cfg.tracking.target_class, getattr(cfg, "match_allow", None)))
       else:
         target = None
         y2 = 0.0
@@ -98,9 +105,11 @@ def _build_sensors():
 
   tcs_crossed = False
   tcs_yellow = False
+  tcs_on_line = False
   if tcs is not None:
     tcs_crossed = tcs.crossed_yellow()
-    tcs_yellow = tcs._prev_yellow
+    tcs_on_line = tcs.on_line
+    tcs_yellow = tcs_on_line
 
   return {
     "new_frame": new_frame,
@@ -110,6 +119,7 @@ def _build_sensors():
     "cam_timeout": cam_timeout,
     "tcs_crossed": tcs_crossed,
     "tcs_yellow": tcs_yellow,
+    "tcs_on_line": tcs_on_line,
   }
 
 # =============================================================================

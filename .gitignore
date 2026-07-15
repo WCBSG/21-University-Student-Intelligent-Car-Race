@@ -11,3 +11,4 @@ Model/yolo3_smartcar/add_post_processing_64.dll
 Model/yolo3_smartcar/add_post_processing_64.so
 Model/view_output
 __pycache__/
+CODE/.flash/

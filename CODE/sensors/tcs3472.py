@@ -55,6 +55,11 @@ class TCS3472:
     self._prev_yellow = False
     self._yellow_count = 0
     self._inited = False
+    # 滞回: 连续 confirm_n 帧黄 → ON；连续 confirm_n 非黄 → OFF
+    self.confirm_n = 4
+    self._on_line = False
+    self._y_streak = 0
+    self._n_streak = 0
 
     # 可调黄色阈值 — 基于 Clear 归一化 (r/c, g/c, b/c)
     # 实地标定 (I2C1): 蓝布 rn≈0.19 gn≈0.32 bn≈0.44;
@@ -127,19 +132,37 @@ class TCS3472:
 
   def crossed_yellow(self):
     """
-    黄线上升沿检测: 上次不是黄、这次是黄 → True。
-    每拍调用一次，用于 PUSH 阶段检测「推出黄线」瞬间。
+    黄线 OFF→ON 上升沿（带滞回）。
+    连续 confirm_n 帧为黄才进入 ON_LINE 并返回 True 一次；
+    连续 confirm_n 帧非黄才回到 OFF_LINE。
+    每拍调用一次。PUSH 阶段用返回值计分。
     """
-    now = self.is_yellow()
-    crossed = (now and not self._prev_yellow)
-    self._prev_yellow = now
-    if crossed:
-      self._yellow_count += 1
-    return crossed
+    raw = self.is_yellow()
+    rising = False
+    if raw:
+      self._n_streak = 0
+      self._y_streak += 1
+      if (not self._on_line) and self._y_streak >= self.confirm_n:
+        self._on_line = True
+        rising = True
+        self._yellow_count += 1
+    else:
+      self._y_streak = 0
+      self._n_streak += 1
+      if self._on_line and self._n_streak >= self.confirm_n:
+        self._on_line = False
+    self._prev_yellow = raw
+    return rising
 
   def reset_crossed(self):
-    """复位上升沿状态（每次 SCORE 后调用）。"""
-    self._prev_yellow = False
+    """复位上升沿相关计数（进 PUSH 前调用）。不强制清 ON_LINE。"""
+    self._y_streak = 0
+    self._n_streak = 0
+
+  @property
+  def on_line(self):
+    """滞回后的在线状态。"""
+    return self._on_line
 
   @property
   def yellow_cross_count(self):

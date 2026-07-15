@@ -417,9 +417,6 @@ def _make_main_page(match_holder=None):
 
 def _make_imu_page(imu):
   """IMU 状态页（含实时姿态 + 磁力计开关/标定入口）"""
-  def _get_ath():  return config["angle_threshold"]
-  def _set_ath(v): config["angle_threshold"] = v
-
   if imu is not None:
     def _get_yaw():
       return "Yaw:{:+.1f}".format(imu.get_yaw())
@@ -472,10 +469,6 @@ def _make_imu_page(imu):
       MenuItem("IMU not connected"),
     ]
 
-  imu_items.append(
-    AdjustItem("Thresh:", _get_ath, _set_ath, 1.0, 90.0, 1.0,
-               persistent=True, formatter=lambda v: "{:.0f} deg".format(v))
-  )
   imu_items.append(
     MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 0))
   )
