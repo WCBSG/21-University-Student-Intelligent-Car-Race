@@ -65,6 +65,7 @@ target = None
 y2 = 0.0
 tcs = None
 match = None
+match_holder = [None]  # 可变容器: 先建 Menu 页后注入 MatchRunner
 camera = None
 robot = None
 
@@ -125,6 +126,7 @@ if BOOT_MODE == "MATCH":
   tcs = TCS3472(make_i2c())
   robot = build_robot(arbiter, cfg, imu)
   match = MatchRunner(robot, arbiter, tcs, cfg)
+  match_holder[0] = match
   _log("MATCH profile", "MATCH")
 
   M_WAIT_CALIB, M_WAIT_CAM, M_READY, M_RUN, M_DONE = 0, 1, 2, 3, 4
@@ -207,6 +209,7 @@ if BOOT_MODE == "MATCH":
       LED.value(0 if (cycle < 150 or (300 < cycle < 450) or (600 < cycle < 750)) else 1)
 
     sensors = _build_sensors()
+    imu._motor_on = arbiter.motors_active  # |duty|>1；停转[0,0,0] 可开 mag
     robot.tick(dt, sensors)
     match.tick(dt, sensors)
     if _loop % 100 == 0:
@@ -274,7 +277,7 @@ gc.collect()
 try:
   menu = MenuInit(
     W=320, H=200, imu=imu, hdg=None, tracker=None, camera=camera,
-    intents=intents, robot=robot,
+    intents=intents, robot=robot, match_holder=match_holder,
     _lcd=_lcd, _lcd_drv=_lcd_drv,
   )
   _log("Menu OK", "INIT")
@@ -292,6 +295,7 @@ from sensors.tcs3472 import TCS3472, make_i2c
 from match.runner import MatchRunner
 tcs = TCS3472(make_i2c())
 match = MatchRunner(robot, arbiter, tcs, cfg)
+match_holder[0] = match
 _mem("after tcs+match")
 
 UP = Pin('C8', Pin.IN, pull=Pin.PULL_UP_47K)
@@ -372,6 +376,7 @@ while True:
       robot.reconnect_pending = False
 
   sensors = _build_sensors()
+  imu._motor_on = arbiter.motors_active  # |duty|>1；停转可开 mag
   robot.tick(dt, sensors)
   match.tick(dt, sensors)
 

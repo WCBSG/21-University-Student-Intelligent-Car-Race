@@ -325,6 +325,7 @@ class ImuSensor:
     self._gyro_yaw = 0.0           # 纯陀螺累积 yaw (deg), ISR 写
     self._fused_offset = 0.0       # mag 修正累积 (deg), 主循环写
     self._gyro_dps = 0.0           # 陀螺模长 (deg/s), 用于 ω 门控
+    self._motor_on = False         # 主循环每拍: arbiter.motors_active
 
   def update(self):
     """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
@@ -474,11 +475,12 @@ class ImuSensor:
     heading = math.atan2(my_h, mx_h) * RAD_TO_DEG  # Y右系
     return self._normalize_angle(heading)
 
-  def get_fused_yaw(self, motor_on=False, alpha=None):
+  def get_fused_yaw(self, motor_on=False, alpha=None, apply=True):
     """
-    互补融合航向角 (deg)。★ 写回 _fused_offset 使修正持续累积。
+    互补融合航向角 (deg)。apply=True → 写回 _fused_offset 使修正持续累积。
+    apply=False → 只读显示（菜单/调试用，不改变状态）。
     motor_on 或 |ω|>5°/s → α=0; 静止/低速 → α 融合磁。
-    返回 (yaw, source): source='gyro'|'mag'。
+    返回 (yaw, source): source='fused'|'gyro'。
     """
     gyro = self.get_gyro_yaw()
     if not self._mag_enabled:
@@ -493,20 +495,22 @@ class ImuSensor:
     # 自适应 α
     if alpha is not None:
       a = alpha
-    elif motor_on or self._gyro_dps > 5.0:  # ω 门控
+    elif motor_on or self._motor_on or self._gyro_dps > 5.0:
       a = 0.0
     else:
       a = self._mag_alpha
 
+    prev = gyro + self._fused_offset
+
     if a <= 0.0:
-      return gyro + self._fused_offset, "gyro"
+      return prev, "gyro"
 
     # 互补: offset += α·(mag − fused_prev)
-    prev = gyro + self._fused_offset
     diff = self._normalize_angle(mag - prev)
-    self._fused_offset += a * diff
-    fused = gyro + self._fused_offset
-    return self._normalize_angle(fused), "mag"
+    if apply:
+      self._fused_offset += a * diff
+    fused = gyro + self._fused_offset if apply else prev + a * diff
+    return self._normalize_angle(fused), "fused"
 
   # ——————————————————————————————————————————————————————————
   #                      磁力计参数
@@ -518,9 +522,16 @@ class ImuSensor:
 
   @mag_enabled.setter
   def mag_enabled(self, v):
-    if not bool(v):
-      self._fused_offset = 0.0   # 关 mag 时清修正
+    was_on = self._mag_enabled
     self._mag_enabled = bool(v)
+    if self._mag_enabled and not was_on:
+      # ★ 开启时对齐 offset，使 fused = Madgwick yaw，避免跳变
+      q0, q1, q2, q3, _ = self._read_snap()
+      madgwick = math.atan2(2.0 * (q0 * q3 + q1 * q2),
+                            1.0 - 2.0 * (q2 * q2 + q3 * q3)) * RAD_TO_DEG
+      self._fused_offset = self._normalize_angle(madgwick - self.get_gyro_yaw())
+    elif not self._mag_enabled:
+      self._fused_offset = 0.0
 
   @property
   def mag_data(self):

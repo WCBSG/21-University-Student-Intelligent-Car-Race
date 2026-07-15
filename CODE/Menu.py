@@ -375,11 +375,9 @@ class Menu:
 
 PAGE_MAIN        = 0
 PAGE_IMU         = 1
-PAGE_HEADING     = 2
-PAGE_HEADING_PID = 3
-PAGE_TRACKER     = 4
-PAGE_TRACKER_PID = 5
-PAGE_MAG_CAL     = 6
+PAGE_TRACKER     = 2
+PAGE_TRACKER_PID = 3
+PAGE_MAG_CAL     = 4
 
 
 # =============================================================================
@@ -396,13 +394,22 @@ def _make_go_action(target_id, focus_index=0):
 #                          内部：页面工厂函数
 # =============================================================================
 
-def _make_main_page():
-  """主页 — 导航入口"""
+def _make_main_page(match_holder=None):
+  """主页 — 导航入口; match_holder=[MatchRunner] 可变容器, 支持先建页后注入"""
+  def _start_match(m, i):
+    runner = match_holder[0] if match_holder else None
+    if runner is not None:
+      # 非 IDLE/DONE → 先 ABORT 复位, 再发车（如停在 COMPLETE 时点重开）
+      if runner.phase not in ("IDLE", "DONE"):
+        runner.stop()
+      if runner.phase in ("IDLE", "DONE"):
+        runner.start()
+
   return MenuPage(
     id=PAGE_MAIN, name="Main Menu",
     items=[
-      MenuItem("IMU",     action=_make_go_action(PAGE_IMU, 0)),
-      MenuItem("Heading", action=_make_go_action(PAGE_HEADING, 0)),
+      MenuItem("IMU",       action=_make_go_action(PAGE_IMU, 0)),
+      MenuItem("Start Match", action=_start_match),
       MenuItem("Tracker >", action=_make_go_action(PAGE_TRACKER, 0)),
     ],
   )
@@ -436,7 +443,7 @@ def _make_imu_page(imu):
         return "MagH: --"
       return "MagH:{:+.1f}".format(h)
     def _get_fused():
-      y, src = imu.get_fused_yaw(motor_on=False)
+      y, src = imu.get_fused_yaw(apply=False)
       return "Fus:{:+.1f} {}".format(y, src)
     def _get_mag_raw():
       if imu.model != "963":
@@ -532,108 +539,6 @@ def _make_mag_cal_page(imu):
     id=PAGE_MAG_CAL, name="Mag Calib", items=items,
     on_enter=_on_enter, on_exit=_on_exit, refresh_ms=100
   )
-
-
-def _make_heading_page(imu, hdg, intents=None, robot=None):
-  """航向闭环控制页。有 intents 时只发 Intent，不再直调 hdg。"""
-  from app import intent as I
-  from app.mode import HDG as ST_HDG, IDLE as ST_IDLE
-
-  _target_yaw = [0.0]
-
-  def _get_hdg_status():
-    if not imu or not imu.is_calibrated:
-      return "IMU Calibrating..."
-    if robot is None or robot.state != ST_HDG:
-      if robot is not None and robot.state != ST_IDLE:
-        return "FSM:" + robot.state
-      return "Status: Idle"
-    m = robot.mode
-    err = getattr(m, "last_error", 0.0)
-    tgt = getattr(m, "target_heading", 0.0)
-    sub = getattr(m, "sub_mode", "straight")
-    if sub == "straight":
-      return "Straight | Err:{:+.1f} | Spd:{:.0f}%".format(
-        err, getattr(m, "forward_speed", 0.0))
-    return "Lock -> {:+.0f} | Err:{:+.1f}".format(tgt, err)
-
-  def _get_target_yaw(): return _target_yaw[0]
-  def _set_target_yaw(v): _target_yaw[0] = v
-  def _get_speed(): return config["target_speed"]
-  def _set_speed(v): config["target_speed"] = v
-
-  def _go_straight(m, i):
-    if intents is not None:
-      intents.post(I.GO_STRAIGHT)
-
-  def _lock_yaw(m, i):
-    if intents is not None:
-      intents.post(I.LOCK_YAW, _target_yaw[0])
-
-  def _lock_cur(m, i):
-    if intents is not None:
-      intents.post(I.LOCK_YAW)
-
-  def _stop(m, i):
-    if intents is not None:
-      intents.post(I.STOP)
-
-  return MenuPage(
-    id=PAGE_HEADING, name="Heading Control",
-    items=[
-      MenuItem("Status", get_value=_get_hdg_status),
-      AdjustItem("Speed:", _get_speed, _set_speed,
-                 0.0, 100.0, 5.0, persistent=True,
-                 formatter=lambda v: "{:.0f}%".format(v)),
-      MenuItem("Go Straight", action=_go_straight),
-      AdjustItem("Target:", _get_target_yaw, _set_target_yaw,
-                 -180.0, 180.0, 5.0, persistent=False,
-                 formatter=lambda v: "{:+.0f} deg".format(v)),
-      MenuItem("Lock Yaw", action=_lock_yaw),
-      MenuItem("Lock Current", action=_lock_cur),
-      MenuItem("STOP", action=_stop),
-      MenuItem("PID Tune >", action=_make_go_action(PAGE_HEADING_PID, 0)),
-      MenuItem("[ Back ]", action=_make_go_action(PAGE_MAIN, 1)),
-    ],
-    refresh_ms=200,
-  )
-
-
-def _make_heading_pid_page(hdg):
-  """航向 PID 调参页（引用模式 → update_pid_gains 为 no-op）"""
-  def _get_hkp():  return config["heading_kp"]
-  def _set_hkp(v): config["heading_kp"] = v
-  def _get_hki():  return config["heading_ki"]
-  def _set_hki(v): config["heading_ki"] = v
-  def _get_hkd():  return config["heading_kd"]
-  def _set_hkd(v): config["heading_kd"] = v
-  def _get_hmax(): return config["heading_max_correction"]
-  def _set_hmax(v): config["heading_max_correction"] = v
-  def _get_hdb():  return config["heading_deadband"]
-  def _set_hdb(v): config["heading_deadband"] = v
-
-  return MenuPage(
-    id=PAGE_HEADING_PID, name="Heading PID",
-    items=[
-      AdjustItem("Kp:", _get_hkp, _set_hkp,
-                 0.0, 20.0, 0.1, persistent=True,
-                 formatter=lambda v: "{:.2f}".format(v)),
-      AdjustItem("Ki:", _get_hki, _set_hki,
-                 0.0, 5.0, 0.01, persistent=True,
-                 formatter=lambda v: "{:.3f}".format(v)),
-      AdjustItem("Kd:", _get_hkd, _set_hkd,
-                 0.0, 5.0, 0.01, persistent=True,
-                 formatter=lambda v: "{:.3f}".format(v)),
-      AdjustItem("MaxCorr:", _get_hmax, _set_hmax,
-                 5.0, 100.0, 5.0, persistent=True,
-                 formatter=lambda v: "{:.0f}%".format(v)),
-      AdjustItem("Deadband:", _get_hdb, _set_hdb,
-                 0.0, 10.0, 0.5, persistent=True,
-                 formatter=lambda v: "{:.1f} deg".format(v)),
-      MenuItem("[ Back ]", action=_make_go_action(PAGE_HEADING, 7)),
-    ],
-  )
-
 
 def _make_tracker_page(tracker, camera, intents=None, robot=None):
   """视觉跟踪主页面。有 intents 时只发 Intent。"""
@@ -771,15 +676,13 @@ def _make_tracker_pid_page(tracker):
 # =============================================================================
 
 def _register_pages(imu=None, hdg=None, tracker=None, camera=None,
-                    intents=None, robot=None):
+                    intents=None, robot=None, match_holder=None):
   """注册所有页面到全局注册表。由 MenuInit 调用。"""
-  _register(_make_main_page())
+  _register(_make_main_page(match_holder))
   _register(_make_imu_page(imu))
   _register(_make_mag_cal_page(imu))
 
-  if hdg is not None or robot is not None:
-    _register(_make_heading_page(imu, hdg, intents=intents, robot=robot))
-    _register(_make_heading_pid_page(hdg))
+  # Heading 页已删除 — 主菜单直接 "Start Match" 进 MATCH
 
   if tracker is not None or robot is not None:
     _register(_make_tracker_page(tracker, camera, intents=intents, robot=robot))
@@ -795,7 +698,7 @@ def MenuInit(W=320, H=200, Cx=None,
              spiIndex=2, baudrate=60000000,
              step_angle=18, max_visible=5, base_size=16,
              imu=None, hdg=None, tracker=None, camera=None,
-             intents=None, robot=None,
+             intents=None, robot=None, match_holder=None,
              _lcd=None, _lcd_drv=None):
   """
   初始化菜单系统：屏幕 → 显示驱动 → 加载配置 → 创建 Menu → 注册页面 → 进入主页。
@@ -843,7 +746,7 @@ def MenuInit(W=320, H=200, Cx=None,
               base_size=base_size)
 
   # 4. 注册页面并进入主页（立刻画一帧，避免之后 RAM 更紧时永久黑屏）
-  _register_pages(imu, hdg, tracker, camera, intents=intents, robot=robot)
+  _register_pages(imu, hdg, tracker, camera, intents=intents, robot=robot, match_holder=match_holder)
   menu.goto(get_page(PAGE_MAIN))
   menu.update_display()
 

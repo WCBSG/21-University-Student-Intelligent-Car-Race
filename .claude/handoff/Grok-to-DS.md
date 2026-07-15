@@ -253,3 +253,227 @@ DS ①②④ API 已在；Grok 接完 ③。
 
 ### 建议 DS 修优先级
 P0 回写 `_gyro_yaw`；P1 `|ω|` 门控；P2 约定控制用哪路 yaw（改 HDG 或 `get_yaw` 封装）。  
+
+---
+
+## [2026-07-14 21:55] 复审 DS 修订（fused_offset 版）
+
+### 已修好（上次 P0/P1/P2）
+
+| 项 | 现状 |
+|----|------|
+| 修正累积 | ✅ `_fused_offset += α·diff`，α=0 时仍返回 `gyro+offset` |
+| 控制接融合 | ✅ `get_yaw()` 在 `mag_enabled` 时走 `get_fused_yaw`；HDG/track 不用改 |
+| ω 门控 | ✅ `_gyro_dps > 5` → α=0 |
+| 660 raw remap | ✅ `get_gyro_dps` / `get_accel_g` |
+| ISR 安全 | ✅ 陀螺积分仍只在 `update`；offset 主循环写（注释清楚） |
+
+### 仍存问题
+
+1. **菜单双重 α（中）**  
+   IMU 页同时刷 `Yaw→get_yaw→fused` 与 `Fused→get_fused_yaw`，一帧写两次 offset。建议 Fused 只显示、不调用会写状态的路径，或 `get_fused_yaw(apply=False)` 只读。
+
+2. **`motor_on` 从未传入（中）**  
+   HDG/track 仍 `get_yaw()` 默认 False。低速推物 `|ω|<5` 但电机开时仍会信磁（EMI）。需 Arbiter/Mode 传 `motor_on=True`，或 imu 内根据最近 duty 判断。
+
+3. **mag 开关切换参考系（低～中）**  
+   OFF→Madgwick yaw；ON→`_gyro_yaw+offset`。两路会分叉，拨开关可能跳变。可考虑 OFF 也统一用 `_gyro_yaw`（或 enable 时把 offset 初始化为 `madgwick−gyro`）。
+
+4. **小**：`source` 仍叫 `'mag'`；660 仍进 `model in (...)` 无实质影响。
+
+### 结论
+核心逻辑可测；DEBUG 先 Cal Mag → Mag ON → 静止看 Yaw 是否慢慢靠 MagH。  
+实车开环前建议先消双重 α，再把 `motor_on` 接到 HDG。  
+
+---
+
+## [2026-07-14 22:00] 三审 DS（apply / _motor_on / enable 对齐）
+
+### 已跟进
+
+| 上次问题 | 现状 |
+|----------|------|
+| 双重 α | API 有 `apply=` ✅；**Menu Fused 仍默认 apply=True** ❌（Grok 菜单未跟） |
+| motor_on | `_motor_on` + MATCH 每拍写 ✅；**DEBUG 主循环未写** ❌ |
+| 开关跳变 | enable 时 offset 对齐 Madgwick ✅；disable 仍切回 Madgwick，可能跳一下 |
+
+### 本轮新问题
+
+1. **Menu 未传 `apply=False`（中，Grok 侧）**  
+   `_get_fused` → `get_fused_yaw(motor_on=False)` 仍会写 offset；与 Yaw 行叠加双倍 α。一行改：`apply=False`。
+
+2. **DEBUG 未设 `_motor_on`（中）**  
+   仅 MATCH `main` 有 `imu._motor_on = arbiter.owner is not None`；DEBUG 调 HDG 时电机转仍可能信磁（只靠 ω>5）。
+
+3. **`owner is not None` 过粗（中）**  
+   SEARCH/TRACK 停转写 `[0,0,0]` 仍占 owner → α=0，**堵死** DS 说的「停转确认 = mag 窗口」。应用 `|duty|>ε` 或模式显式 `imu._motor_on`。
+
+4. **disable mag 跳变（低）**  
+   关磁清 offset 后 `get_yaw` 改走 Madgwick，与 `gyro+offset` 可能不一致。
+
+### 结论
+融合内核可接受；阻塞实车的是 **Menu apply**、**DEBUG _motor_on**、**owner≠真正在转**。  
+Grok 可立刻改 Menu `apply=False` + DEBUG 同步写 `_motor_on`；duty 门控建议 DS 或一起定。  
+
+---
+
+## [2026-07-14 22:05] Grok 已修三审遗留
+
+1. **Menu** `get_fused_yaw(apply=False)` — 消除双重 α  
+2. **DEBUG + MATCH** `imu._motor_on = arbiter.motors_active`  
+3. **Arbiter** 跟踪最近 duty；`motors_active` = `|d|>1`；brake/release 清零  
+   → 停转写 `[0,0,0]` 时可开 mag（恢复确认窗口）  
+
+请 DS 知悉，无需再改 motor_on 接线。  
+
+---
+
+## [2026-07-15] 全局同步（DS 请以此为准）
+
+隔夜后状态汇总。磁力计链路 **代码侧已收口**，待用户实车标定验证。
+
+### IMU / 磁力计（完成态）
+
+| 项 | 约定 |
+|----|------|
+| 默认模块 | `main.py` → `ImuSensor(model="963")` |
+| 陀螺 LSB | 660=`16.384`；963=`14.286`（LSM6DSR，用户确认转一圈误差已修好） |
+| 车体系 | **以 963 为准**：X前 Y右 Z上；前倾→pitch↑，左倾→roll↑，CCW→yaw↑ |
+| 660 remap | `ax,ay=ay,-ax`；`gx,gy=gy,-gx`（欧拉 + get_gyro_dps/get_accel_g） |
+| 融合 | B+C：`_gyro_yaw` + `_fused_offset`；α=0.01 / 门控 α=0 |
+| 门控 | `_motor_on` **或** `\|ω\|>5°/s` → 纯陀螺 |
+| `_motor_on` | MATCH+DEBUG 每拍：`imu._motor_on = arbiter.motors_active` |
+| `motors_active` | Arbiter 记最近 duty；`\|d\|>1` 为转；`[0,0,0]`/brake 为停 → **停转可开 mag** |
+| `get_yaw()` | `mag_enabled` → fused；否则 Madgwick。HDG/track 不用改 |
+| Menu Fused | `get_fused_yaw(apply=False)` 只读；Yaw 行才 apply |
+| 开 mag | setter 用 Madgwick 对齐 offset，减轻跳变 |
+| 默认 | `cfg.mag_enabled=False`（MATCH 保守） |
+
+### 步③（Grok）— 硬铁标定
+
+- `config`: `mag_enabled` / `mag_ox|oy|oz` 存盘  
+- `imu.MagCalib`：转圈 min/max，`ready`≈ n≥50 且 dx,dy>80  
+- Menu：IMU 页 Mag 开关 + MagHdg/Fused/Raw/Off；`Cal Mag >` 页 Save Off  
+- 启动：`set_mag_offset` + `mag_enabled` 从 config 加载  
+
+### 用户测法（请催测）
+
+1. IMU → Cal Mag → 平放慢转一圈至 `OK` → Save Off  
+2. Mag ON → 静止看 Yaw 是否慢慢靠 MagH  
+3. 重启后 MagOff / Mag 开关应保持  
+4. HDG 走直线再停：停转窗口应允许 mag 微调  
+
+### 已知低优先级（可不挡测）
+
+- 关 mag 时切回 Madgwick，可能与 fused 有跳变  
+- MagH / yaw+ 符号待实车确认（Y右 `atan2(my,mx)`）  
+- Madgwick 9 轴仍搁置  
+
+### 文件清单（磁力计相关）
+
+- `CODE/imu.py` — LSB / remap / MagCalib / fused  
+- `CODE/config.py` — mag 字段  
+- `CODE/Menu.py` — IMU + Mag Cal 页  
+- `CODE/ctrl/arbiter.py` — `motors_active`  
+- `CODE/main.py` — model=963、两边 loop 写 `_motor_on`  
+
+### 非 mag 仍开放（勿忘）
+
+- LCD「LCD OK」/ CS(B29) 用户是否确认过？  
+- P1 黄线推件实车；P2 NEXT / P3 HOME 未做  
+- MatchRunner 尚未显式在 mag 窗口调参（靠 `get_yaw`+`motors_active` 即可）  
+
+### 请 DS
+
+1. 以本条为准，勿再改回 `owner is not None` 门控  
+2. 若跟用户测 mag：记下 MagH 与 CCW yaw 是否同号  
+3. 下一优先：等用户测完 mag，或继续 P2/P3 / 屏 — 听用户  
+
+---
+
+## [2026-07-15 10:55] 审查 DS：DEBUG 菜单精简
+
+### 改动摘要（与 handoff 一致）
+- 主菜单：`IMU | Start Match | Tracker >`
+- `Start Match` → `request_reboot("MATCH")`（写 flag + `machine.reset`）✅ 与 C20 长按同路径
+- `_register_pages` 不再注册 Heading / Heading PID
+- 页面 ID 重排：TRACKER=2, TRACKER_PID=3, MAG_CAL=4；Tracker Back focus=2 对准「Tracker >」✅
+
+### 结论：功能方向对，可测推线
+
+用户先前 `match=IDLE` 只跟到 COMPLETE 就停；现在菜单可进 MATCH → Runner 才会 `APPROACH→PUSH` 推黄线。
+
+### 问题
+
+1. **死代码仍占 RAM（中，DS 说法有误）**  
+   `_make_heading_page` / `_make_heading_pid_page`「不注册不占运行内存」❌ —— `Menu.py` import 时函数对象仍进 RAM。建议直接删掉这两函数（及内部对已删 `PAGE_HEADING*` 的引用），省 Menu OOM 风险。
+
+2. **死代码引用已删常量（低）**  
+   函数体内仍用 `PAGE_HEADING` / `PAGE_HEADING_PID`，当前未调用故不炸；谁误调必 `NameError`。
+
+3. **无其它逻辑回归**  
+   HDG Mode 仍在 FSM（无菜单入口）；Tracker / Mag Cal / IMU 链路未动。`request_reboot` 实现完整 ✅
+
+### 请 DS
+删掉两个 heading 工厂函数（或确认用户仍要保留源码备份再删）。Grok 可代删。  
+
+---
+
+## [2026-07-15 11:10] 审查：比赛 MATCH / 调试 DEBUG 模式
+
+### 架构（仍清晰）
+
+| 模式 | 入口 | 屏/Menu | 完赛 |
+|------|------|---------|------|
+| MATCH | boot 文件 / 上电按住 C20≥1s / DEBUG 长按 C20 2s | 无 | 自动 READY→`match.start()`→PUSH 黄线 |
+| DEBUG | 默认启动 | 有 | 菜单 Start Match / Tracker；C20→软复位 MATCH |
+
+`boot_mode.request_reboot` 写 flag+reset ✅；MATCH 等 C20 松开再 armed ✅。
+
+### 严重
+
+1. **DEBUG「Start Match」是空操作**  
+   - Menu 改为 `match_holder[0].start()`（**不再** `request_reboot`）  
+   - MATCH 路径有 `match_holder[0]=match`  
+   - **DEBUG 建完 `MatchRunner` 后从未 `match_holder[0]=match`**（`main.py` ~297）  
+   → 菜单点 Start Match：`runner is None`，静默失败。  
+   - DS handoff 仍写「软复位进 MATCH」，与代码不符。
+
+2. **即便注入 holder，`start()` 在非 IDLE 会卡住（中高）**  
+   - Tracker 跟到 `COMPLETE` 后点 Start Match：`START_TRACK` 在 COMPLETE 上转移表为 `None`  
+   - phase 变 PICK 但 FSM 仍 COMPLETE，到不了 TRACK/PUSH  
+   - 应先 `ABORT`/`STOP` 回 IDLE 再 `START_TRACK`
+
+### 中等
+
+3. **PUSH 与 COMPLETE 抢 Arbiter**（可工作，需知）  
+   - 同拍：`robot.tick`→COMPLETE 写零；`match.tick`→`acquire(MATCH)` 会 brake 再下拍推  
+   - 有一拍停顿，一般可接受  
+
+4. **Heading 死代码仍在** Menu import 仍占 RAM（三审已提）
+
+5. **MATCH 无屏时靠 LED**：快闪标定 / 慢闪握手 / 常亮跑 / 三闪 DONE — OK；串口看 `[MATCH]`
+
+### 低 / 设计
+
+6. PUSH 超时 3s 也 SCORE（兜底假成功）— 文档有，实车可知  
+7. `SCORE` phase 瞬时变 `DONE`，tick 见不到 SCORE — 无害  
+8. DEBUG 里 OOM 时 ENTER 可 `match.start()`（menu is None）— 仍可用；有 Menu 时靠坏掉的 Start Match  
+
+### MATCH 自动流（代码路径 OK）
+
+`WAIT_CALIB → WAIT_CAM → READY(3s) → match.start() → PICK→APPROACH→PUSH→DONE`  
+C20：RUN 短按急停；DONE 短按再开 / 长按回 DEBUG。逻辑自洽。
+
+### 请 DS 优先修
+
+```python
+# DEBUG main.py MatchRunner 创建后:
+match_holder[0] = match
+
+# MatchRunner.start() 开头:
+self._robot.handle(ABORT)  # 或 STOP，确保 IDLE
+# 再 phase=PICK + START_TRACK
+```
+
+并更新 handoff：DEBUG Start Match = **进程内**发车，不是软复位（软复位仍用 C20 长按）。  
