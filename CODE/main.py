@@ -1,7 +1,7 @@
 """
 main.py — 纯比赛固件（无 Menu / 无 LCD）
 
-上电：Motors → Config → IMU → Camera → TCS → FSM → Match
+上电：Motors → Config → IMU → Camera → TCS → Match
 等待 IMU 标定 + 相机握手完成后串口提示 READY
 短按 C20：发车 / 急停 / DONE 后再开一局
 状态全部 print 到串口
@@ -25,9 +25,8 @@ def _mem(tag):
 #                              硬件 / 模块初始化
 # =============================================================================
 info("MAIN", "Motors...")
-from Motor import MotionControl
+from motion import MotionControl, MotorArbiter, select_target
 motors = MotionControl()
-from ctrl import MotorArbiter, select_target
 arbiter = MotorArbiter(motors)
 
 info("MAIN", "Config...")
@@ -35,12 +34,11 @@ from config import config as cfg, load_config
 load_config()
 log_setup(cfg.debug_output)
 
-# —— 提前 import 大模块（fsm + runner），趁 RAM 充裕时完成解析编译 ——
+# —— 提前 import 大模块（match），趁 RAM 充裕时完成解析编译 ——
 # 实例化延后到所有硬件就绪之后
-info("MAIN", "FSM + Runner import...")
+info("MAIN", "Match import...")
 _mem("pre-fsm")
-from fsm import build_robot
-from runner import MatchRunner
+from match import build_robot, MatchRunner
 _mem("post-runner")
 
 info("MAIN", "IMU963...")
@@ -99,7 +97,7 @@ tcs.yellow_c_min = int(cfg.tcs_c_min)
 _mem("tcs")
 
 # —— 实例化（所有硬件依赖已就绪） ——
-info("MAIN", "FSM + Match build...")
+info("MAIN", "Match build...")
 _mem("pre-build")
 robot = build_robot(arbiter, cfg, imu)
 match = MatchRunner(robot, arbiter, tcs, cfg)

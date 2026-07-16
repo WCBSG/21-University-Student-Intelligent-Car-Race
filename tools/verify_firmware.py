@@ -13,17 +13,16 @@ RESULT = Path(__file__).with_suffix(".result.txt")
 
 MODULES = (
   "main.py",
-  "runner.py",
-  "fsm.py",
-  "ctrl.py",
+  "match.py",
+  "motion.py",
   "camera.py",
   "config.py",
   "tcs3472.py",
   "imu.py",
-  "Motor.py",
+  "log.py",
 )
 
-REQUIRED_RUNNER_TEXT = (
+REQUIRED_MATCH_TEXT = (
   "rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt)",
   "PUSH timeout %dms — NOT scored",
   'self._fault("HOME timeout — gate not confirmed")',
@@ -32,6 +31,14 @@ REQUIRED_RUNNER_TEXT = (
   'self.phase = "FINAL_APPROACH"',
   "def navigation_snapshot(self, sensors=None):",
   "self._approach_deadline",
+)
+
+STALE_FILES = (
+  "runner.py",
+  "fsm.py",
+  "ctrl.py",
+  "Motor.py",
+  "bitbang_i2c.py",
 )
 
 
@@ -45,6 +52,13 @@ def main():
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
       except Exception as exc:
         errors.append("%s: %s" % (path.relative_to(ROOT), exc))
+
+  for name in STALE_FILES:
+    for root in (CODE, FLASH):
+      path = root / name
+      if path.exists():
+        errors.append("%s: stale file remains after merge" %
+                      path.relative_to(ROOT))
 
   for path in (CODE / "config.json", FLASH / "config.json"):
     try:
@@ -64,10 +78,10 @@ def main():
     except Exception as exc:
       errors.append("%s: %s" % (path.relative_to(ROOT), exc))
 
-  for path in (CODE / "runner.py", FLASH / "runner.py"):
+  for path in (CODE / "match.py", FLASH / "match.py"):
     try:
       text = path.read_text(encoding="utf-8")
-      for required in REQUIRED_RUNNER_TEXT:
+      for required in REQUIRED_MATCH_TEXT:
         if required not in text:
           errors.append("%s: missing %r" % (path.relative_to(ROOT), required))
       if "PRE_PUSH" in text:
@@ -75,7 +89,9 @@ def main():
     except Exception as exc:
       errors.append("%s: %s" % (path.relative_to(ROOT), exc))
 
-  key_param = ROOT / "docs" / "KeyParam.md"
+  key_param = ROOT / "KeyParam.md"
+  if not key_param.exists():
+    key_param = ROOT / "docs" / "KeyParam.md"
   try:
     text = key_param.read_text(encoding="utf-8")
     for required in ("`场心航向 = 0.0°`", "y2 = 78.4", "C ≈ 5475"):
