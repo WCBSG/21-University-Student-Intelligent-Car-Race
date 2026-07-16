@@ -34,12 +34,14 @@ from config import config as cfg, load_config
 load_config()
 log_setup(cfg.debug_output)
 
-# —— 提前 import 大模块（match），趁 RAM 充裕时完成解析编译 ——
+# —— 提前 import 大模块（分步，避免单文件编译峰值 OOM） ——
 # 实例化延后到所有硬件就绪之后
-info("MAIN", "Match import...")
-_mem("pre-fsm")
-from match import build_robot, MatchRunner
-_mem("post-runner")
+info("MAIN", "Robot + Match import...")
+_mem("pre-robot")
+from robot import build_robot
+_mem("post-robot")
+from match import MatchRunner
+_mem("post-match")
 
 info("MAIN", "IMU963...")
 from imu import ImuSensor
@@ -55,9 +57,6 @@ imu.set_fusion_params(
   mag_dead=float(cfg.imu_mag_dead),
   mag_pull_max=float(cfg.imu_mag_pull_max),
   mag_still_need=int(cfg.imu_mag_still_need))
-imu.set_mag_calib_params(
-  min_samples=int(cfg.imu_mag_calib_min_samples),
-  min_span=float(cfg.imu_mag_calib_min_span))
 info("IMU", "IMU model=%s mag=%s calibrating..." % (
   imu.model, "ON" if imu.mag_enabled else "OFF"))
 _mem("imu")

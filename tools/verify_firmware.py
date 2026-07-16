@@ -13,6 +13,7 @@ RESULT = Path(__file__).with_suffix(".result.txt")
 
 MODULES = (
   "main.py",
+  "robot.py",
   "match.py",
   "motion.py",
   "camera.py",
