@@ -110,7 +110,9 @@ def _parse(payload):
       payload[off + 3] / 2.55, payload[off + 4] / 2.55,
     ))
   # add derived fields: cx, cy, area, y2
-  return [(*d, d[2] + d[4] / 2, d[3] + d[5] / 2, d[4] * d[5], d[3] + d[5]) for d in r]
+  return [(d[0], d[1], d[2], d[3], d[4], d[5],
+            d[2] + d[4] / 2, d[3] + d[5] / 2,
+            d[4] * d[5], d[3] + d[5]) for d in r]
 
 
 # =============================================================================
@@ -151,9 +153,11 @@ class CameraRx:
         cmd, payload = _recv_handshake(self._uart, timeout_ms=rt)
         if cmd == 0x02:
           if (payload or b"").decode('utf-8') == "200":
-            _send_frame(self._uart, 0x03); time.sleep_ms(10)
-            self._ready = True; self._last_ms = time.ticks_ms()
-            return True
+            if _send_frame(self._uart, 0x03):
+              time.sleep_ms(10)
+              self._ready = True; self._last_ms = time.ticks_ms()
+              return True
+            return False
           self._failed = True; return False
         time.sleep_ms(5)
     return False

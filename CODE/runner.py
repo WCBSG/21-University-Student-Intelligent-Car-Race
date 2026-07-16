@@ -1,7 +1,7 @@
 """
 match/runner.py — 单车完赛编排（最终计划）
 
-LEAVE → PICK → APPROACH → PRE_PUSH → PUSH → SCORE
+LEAVE → PICK → APPROACH → ORBIT → FINAL_APPROACH → PUSH → SCORE
   ↑── 转180° + 直行见目标 ── scored < N
                            scored ≥ N → HOME → DONE
 
@@ -11,7 +11,7 @@ LEAVE → PICK → APPROACH → PRE_PUSH → PUSH → SCORE
 运动学: 平移 = MotionControl.move；旋转 = [s,s,s]
 """
 
-from time import ticks_ms, ticks_diff
+from time import ticks_ms, ticks_diff, ticks_add
 from Motor import MotionControl
 from ctrl import HeadingPID
 from config import CLS_LEFT, CLS_RIGHT
@@ -50,7 +50,16 @@ class MatchRunner:
     self._home_y2 = None  # leg2 yaw or None=skip
     self._home_deadline = 0
     self._hdg_pid = HeadingPID(gains=cfg.heading)
+    self._bearing_pid = HeadingPID(gains=cfg.tracking_bearing)
     self._hdg_ms = ticks_ms()
+    self._ctrl_ms = ticks_ms()
+    self._orbit_confirm = 0
+    self._vision_lost = 0
+    self._approach_deadline = 0
+    self._cmd_forward = 0.0
+    self._cmd_lateral = 0.0
+    self._cmd_rotation = 0.0
+    self.fault_reason = ""
     # 场界黄线：LEAVE 出库线忽略；离线后武装；搜寻中再↑则 RECOVER
     self._boundary_armed = False
     self._wait_off_line = False
@@ -65,11 +74,17 @@ class MatchRunner:
       print("[MATCH] cannot start, phase=%s" % self.phase)
       return False
     self._robot.handle(ABORT)
-    self._arb.force_brake()
+    self._brake()
     self.scored_count = 0
     c = self._cfg
-    self._remaining = [int(x) for x in c.match_order]
+    strict_cls = int(getattr(c, "single_target_class", -1))
+    if getattr(c, "strict_target", False) and 0 <= strict_cls <= 2:
+      self._remaining = [strict_cls]
+    else:
+      self._remaining = [int(x) for x in c.match_order]
     self._active_cls = None
+    self.fault_reason = ""
+    self._approach_deadline = 0
     self._see_streak = 0
     self._sub = ""
     self._phase_ms = ticks_ms()
@@ -94,14 +109,14 @@ class MatchRunner:
     self._cfg.match_allow = None
     self._cfg.tracking.target_class = 7
     self._robot.handle(ABORT)
-    self._arb.force_brake()
+    self._brake()
 
   # ————————————————————————————————————————————————————————
   #                      每拍 tick
   # ————————————————————————————————————————————————————————
 
   def tick(self, dt, sensors):
-    if self.phase == "IDLE" or self.phase == "DONE":
+    if self.phase in ("IDLE", "DONE", "FAULT"):
       return
     if self.phase == "LEAVE":
       self._tick_leave(sensors)
@@ -111,8 +126,10 @@ class MatchRunner:
       self._tick_pick(sensors)
     elif self.phase == "APPROACH":
       self._tick_approach(sensors)
-    elif self.phase == "PRE_PUSH":
-      self._tick_pre_push()
+    elif self.phase == "ORBIT":
+      self._tick_orbit(sensors)
+    elif self.phase == "FINAL_APPROACH":
+      self._tick_final_approach(sensors)
     elif self.phase == "PUSH":
       self._tick_push(sensors)
     elif self.phase == "NEXT":
@@ -135,7 +152,13 @@ class MatchRunner:
     return _wrap(target - self._yaw())
 
   def _write_move(self, speed, angle=0.0):
+    self._set_command(speed, 0.0, 0.0)
     self._arb.write(self.OWNER, MotionControl.move(speed, angle))
+
+  def _set_command(self, forward, lateral, rotation):
+    self._cmd_forward = float(forward)
+    self._cmd_lateral = float(lateral)
+    self._cmd_rotation = float(rotation)
 
   def _write_move_locked(self, speed, yaw_tgt):
     """平移 + 航向 P（同 HDG straight）：纠开环走歪。"""
@@ -145,14 +168,37 @@ class MatchRunner:
       dt = 0.02
     self._hdg_ms = now
     err = self._yaw_err(yaw_tgt)
-    # err>0 表示需要沿正航向旋转；与 _spin_toward() 的符号约定一致。
-    rot = self._hdg_pid.update(err, dt)
+    # 实车标定：三轮同正值顺时针、yaw 减小。
+    rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt)
     fwd = MotionControl.move(float(speed), 0.0)
     duties = [
       self._clamp(fwd[0] + rot, -100.0, 100.0),
       self._clamp(fwd[1] + rot, -100.0, 100.0),
       self._clamp(fwd[2] + rot, -100.0, 100.0),
     ]
+    self._set_command(speed, 0.0, rot)
+    self._arb.write(self.OWNER, duties)
+
+  def _control_dt(self):
+    now = ticks_ms()
+    dt = ticks_diff(now, self._ctrl_ms) / 1000.0
+    if dt <= 0.0 or dt > 0.5:
+      dt = 0.05
+    self._ctrl_ms = now
+    return dt
+
+  def _write_vector(self, forward, lateral, rot):
+    """合成前后、左右平移和原地旋转。lateral>0 为左移。"""
+    fwd = MotionControl.move(float(forward), 0.0)
+    if lateral >= 0.0:
+      side = MotionControl.move(float(lateral), 90.0)
+    else:
+      side = MotionControl.move(float(-lateral), -90.0)
+    duties = [
+      self._clamp(fwd[i] + side[i] + rot, -100.0, 100.0)
+      for i in range(3)
+    ]
+    self._set_command(forward, lateral, rot)
     self._arb.write(self.OWNER, duties)
 
   @staticmethod
@@ -166,9 +212,15 @@ class MatchRunner:
   def _write_spin(self, duty):
     """duty>0 与 HDG 同向（三轮同值=原地转）。"""
     d = float(duty)
+    self._set_command(0.0, 0.0, d)
     self._arb.write(self.OWNER, [d, d, d])
 
+  def _hold_brake(self):
+    self._set_command(0.0, 0.0, 0.0)
+    self._arb.hold_brake(self.OWNER)
+
   def _brake(self):
+    self._set_command(0.0, 0.0, 0.0)
     self._arb.force_brake()
 
   def _aligned(self, target):
@@ -177,19 +229,19 @@ class MatchRunner:
   def _spin_toward(self, target):
     err = self._yaw_err(target)
     if abs(err) <= float(self._cfg.align_tol_deg):
-      self._arb.hold_brake(self.OWNER)
+      self._hold_brake()
       return True
     s = float(self._cfg.drive_duty)
-    if err < 0:
-      s = -s
+    s = self._cfg.yaw_actuation_sign * (s if err > 0 else -s)
     self._write_spin(s)
     return False
 
   def _fault(self, why):
     """停止比赛但不伪装成 DONE，等待人工急停/重新发车。"""
     print("[MATCH] FAULT: %s" % why)
+    self.fault_reason = str(why)
     self._robot.handle(ABORT)
-    self._arb.force_brake()
+    self._brake()
     self.phase = "FAULT"
     self._sub = ""
 
@@ -221,7 +273,13 @@ class MatchRunner:
     决赛：只认 _remaining（可多类），优先 match_order 头部。
     """
     c = self._cfg
-    if int(c.start_layout) == 0 or not self._remaining:
+    strict_cls = int(getattr(c, "single_target_class", -1))
+    if getattr(c, "strict_target", False) and 0 <= strict_cls <= 2:
+      c.match_allow = None
+      c.tracking.target_class = strict_cls
+      self._active_cls = strict_cls
+      return
+    if c.match_mode == "pre" or not self._remaining:
       c.tracking.target_class = 7
       c.match_allow = None
       self._active_cls = None
@@ -231,9 +289,9 @@ class MatchRunner:
       self._active_cls = int(self._remaining[0])
 
   def _push_yaw(self):
-    """决赛推向前目标航向；预赛 layout==0 返回 None（跳过 PRE_PUSH）。"""
+    """决赛推向前目标航向；预赛返回 None（直接推送）。"""
     c = self._cfg
-    if int(c.start_layout) == 0:
+    if c.match_mode == "pre":
       return None
     cls = self._active_cls
     if cls is None:
@@ -271,7 +329,7 @@ class MatchRunner:
     self._set_pick_class()
     # FAULT/COMPLETE 等需先回 IDLE，START_TRACK 才生效
     self._robot.handle(ABORT)
-    self._arb.force_brake()
+    self._brake()
     self.phase = "PICK"
     self._phase_ms = ticks_ms()
     # 出库/回场后可能仍压黄线：先等离线再武装场界
@@ -316,7 +374,7 @@ class MatchRunner:
     """出界：掉头回场，再搜物体。"""
     print("[MATCH] OUT OF BOUNDS (yellow) → RECOVER")
     self._robot.handle(ABORT)
-    self._arb.force_brake()
+    self._brake()
     self._arb.acquire(self.OWNER)
     self._yaw_target = _wrap(self._yaw() + 180.0)
     self._boundary_armed = False
@@ -330,6 +388,7 @@ class MatchRunner:
 
   def _enter_push(self):
     self._arb.acquire(self.OWNER)
+    self._approach_deadline = 0
     self._phase_ms = ticks_ms()
     self._hold_yaw = self._yaw()
     self._hdg_pid.reset()
@@ -338,11 +397,37 @@ class MatchRunner:
     self._sub = "DRIVE"
     print("[MATCH] → PUSH")
 
+  def _enter_orbit(self, target_yaw):
+    previous_phase = self.phase
+    self._robot.handle(STOP)
+    self._arb.acquire(self.OWNER)
+    self._yaw_target = target_yaw
+    self._phase_ms = ticks_ms()
+    if previous_phase != "FINAL_APPROACH":
+      self._approach_deadline = (
+        ticks_add(self._phase_ms, int(self._cfg.approach_cluster_timeout_ms)))
+    self._ctrl_ms = self._phase_ms
+    self._orbit_confirm = 0
+    self._vision_lost = 0
+    self._bearing_pid.reset()
+    self.phase = "ORBIT"
+    self._sub = ""
+    print("[MATCH] → ORBIT yaw=%.1f" % target_yaw)
+
+  def _enter_final_approach(self):
+    self._phase_ms = ticks_ms()
+    self._ctrl_ms = self._phase_ms
+    self._vision_lost = 0
+    self._bearing_pid.reset()
+    self.phase = "FINAL_APPROACH"
+    self._sub = ""
+    print("[MATCH] ORBIT → FINAL_APPROACH")
+
   def _enter_home(self):
     y1, y2 = self._home_plan()
     self._yaw_target = y1
     self._home_y2 = y2
-    self._home_deadline = ticks_ms() + int(self._cfg.home_timeout_ms)
+    self._home_deadline = ticks_add(ticks_ms(), int(self._cfg.home_timeout_ms))
     self._robot.handle(STOP)          # ★ handle 内部 force_brake → owner=None；先停再抢
     self._arb.acquire(self.OWNER)
     self.phase = "HOME"
@@ -376,9 +461,9 @@ class MatchRunner:
       t = sensors.get("target") if sensors else None
       if t is not None:
         self._active_cls = int(t[0])
-      print("[MATCH] PICK → APPROACH cls=%s" % self._active_cls)
-      self.phase = "APPROACH"
-      self._phase_ms = ticks_ms()
+        print("[MATCH] PICK → APPROACH cls=%s" % self._active_cls)
+        self.phase = "APPROACH"
+        self._phase_ms = ticks_ms()
     elif st in (IDLE, FAULT):
       # SEARCH/相机失败：跳过当前类，避免永久卡在 PICK
       self._skip_or_home("PICK state=%s" % st)
@@ -392,29 +477,109 @@ class MatchRunner:
       t = sensors.get("target") if sensors else None
       if t is not None:
         self._active_cls = int(t[0])
-      ty = self._push_yaw()
-      if ty is None:
-        self._enter_push()
-      else:
-        self._yaw_target = ty
-        self._robot.handle(STOP)         # ★ handle 内部 force_brake → owner=None；先停再抢
-        self._arb.acquire(self.OWNER)
-        self.phase = "PRE_PUSH"
-        self._phase_ms = ticks_ms()
-        print("[MATCH] APPROACH → PRE_PUSH yaw=%.1f" % ty)
+        ty = self._push_yaw()
+        if ty is None:
+          self._enter_push()
+        else:
+          self._enter_orbit(ty)
     elif st in (IDLE, FAULT):
       self._skip_or_home("APPROACH state=%s" % st)
     elif ticks_diff(ticks_ms(), self._phase_ms) > 15000:
       # 15s 仍未接近到位：跳过当前类
       self._skip_or_home("APPROACH timeout")
 
-  def _tick_pre_push(self):
-    if self._spin_toward(self._yaw_target):
+  def _tick_orbit(self, sensors):
+    now = ticks_ms()
+    if (self._approach_deadline and
+        ticks_diff(now, self._approach_deadline) > 0):
+      self._fault("ORBIT/FINAL_APPROACH total timeout")
+      return
+    if ticks_diff(now, self._phase_ms) > int(self._cfg.orbit_timeout_ms):
+      self._fault("ORBIT timeout")
+      return
+
+    target = sensors.get("target") if sensors else None
+    if target is None:
+      self._hold_brake()
+      if sensors and sensors.get("new_frame"):
+        self._vision_lost += 1
+      if self._vision_lost >= int(self._cfg.orbit_lost_frames):
+        self._fault("ORBIT target lost")
+      return
+    if sensors and sensors.get("new_frame"):
+      self._vision_lost = 0
+
+    cx = float(target[6])
+    y2 = float(target[9])
+    yaw_err = self._yaw_err(self._yaw_target)
+    stage_y2 = float(self._cfg.tracking.stage_bottom_pct)
+
+    # yaw 需要增加时，从目标右侧绕行；实车 move(s,-90) 为右移。
+    lateral = 0.0
+    if abs(yaw_err) > float(self._cfg.orbit_yaw_tol_deg):
+      direction = -1.0 if yaw_err > 0.0 else 1.0
+      lateral = (direction * float(self._cfg.orbit_direction_sign) *
+                 float(self._cfg.orbit_speed))
+
+    radial = (stage_y2 - y2) * float(self._cfg.orbit_radial_kp)
+    radial = self._clamp(
+      radial,
+      -float(self._cfg.orbit_radial_max),
+      float(self._cfg.orbit_radial_max))
+
+    bearing = (cx - 50.0) / 50.0
+    rot = (float(self._cfg.tracking.bearing_actuation_sign) *
+           self._bearing_pid.update(bearing, self._control_dt()))
+    self._write_vector(radial, lateral, rot)
+
+    aligned = (
+      abs(yaw_err) <= float(self._cfg.orbit_yaw_tol_deg) and
+      abs(cx - 50.0) <= float(self._cfg.orbit_center_tol_pct) and
+      abs(y2 - stage_y2) <= float(self._cfg.orbit_range_tol_pct)
+    )
+    if sensors and sensors.get("new_frame"):
+      self._orbit_confirm = self._orbit_confirm + 1 if aligned else 0
+    if self._orbit_confirm >= int(self._cfg.orbit_confirm_frames):
+      self._hold_brake()
+      self._enter_final_approach()
+
+  def _tick_final_approach(self, sensors):
+    now = ticks_ms()
+    if (self._approach_deadline and
+        ticks_diff(now, self._approach_deadline) > 0):
+      self._fault("ORBIT/FINAL_APPROACH total timeout")
+      return
+    if ticks_diff(now, self._phase_ms) > int(self._cfg.final_approach_timeout_ms):
+      self._fault("FINAL_APPROACH timeout")
+      return
+
+    target = sensors.get("target") if sensors else None
+    if target is None:
+      self._hold_brake()
+      if sensors and sensors.get("new_frame"):
+        self._vision_lost += 1
+      if self._vision_lost >= int(self._cfg.orbit_lost_frames):
+        self._fault("FINAL_APPROACH target lost")
+      return
+    if sensors and sensors.get("new_frame"):
+      self._vision_lost = 0
+
+    if abs(self._yaw_err(self._yaw_target)) > (
+        float(self._cfg.orbit_yaw_tol_deg) * 1.5):
+      self._enter_orbit(self._yaw_target)
+      return
+
+    y2 = float(target[9])
+    if y2 >= float(self._cfg.tracking.contact_bottom_pct):
+      self._hold_brake()
       self._enter_push()
       return
-    # IMU 噪声 / 阈值过严时避免无限自旋
-    if ticks_diff(ticks_ms(), self._phase_ms) > 3000:
-      self._fault("PRE_PUSH alignment timeout")
+
+    bearing = (float(target[6]) - 50.0) / 50.0
+    rot = (float(self._cfg.tracking.bearing_actuation_sign) *
+           self._bearing_pid.update(bearing, self._control_dt()))
+    self._write_vector(
+      float(self._cfg.tracking.final_approach_speed), 0.0, rot)
 
   def _tick_push(self, sensors):
     now = ticks_ms()
@@ -564,7 +729,7 @@ class MatchRunner:
           self._finish()
           return
         # 两段 HOME：保留 MATCH owner，否则 BACKOFF/LEG2 写电机全丢
-        self._arb.hold_brake(self.OWNER)
+        self._hold_brake()
         self._sub = "BACKOFF"
         self._phase_ms = now
         print("[MATCH] HOME → BACKOFF")
@@ -611,7 +776,23 @@ class MatchRunner:
 
   @property
   def is_running(self):
-    return self.phase not in ("IDLE", "DONE")
+    return self.phase not in ("IDLE", "DONE", "FAULT")
+
+  def navigation_snapshot(self, sensors=None):
+    """低频调试快照；由 main 的标定输出调用。"""
+    target = sensors.get("target") if sensors else None
+    cx = float(target[6]) if target is not None else -1.0
+    y2 = float(target[9]) if target is not None else -1.0
+    target_yaw = self._yaw_target
+    if self.phase == "LEAVE" or self.phase == "PUSH":
+      target_yaw = self._hold_yaw
+    elif self.phase in ("NEXT", "RECOVER") and self._sub == "DRIVE":
+      target_yaw = self._hold_yaw
+    yaw = self._yaw()
+    return (
+      self.phase, self._sub, yaw, target_yaw, _wrap(target_yaw - yaw),
+      cx, y2, self._cmd_forward, self._cmd_lateral, self._cmd_rotation,
+      self._orbit_confirm, self._vision_lost)
 
   @property
   def info(self):

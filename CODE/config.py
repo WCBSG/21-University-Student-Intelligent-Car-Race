@@ -24,19 +24,22 @@ class PidGains:
 class TrackingParams:
   def __init__(self):
     self.approach_speed = 15.0
+    self.final_approach_speed = 12.0
     self.search_speed = 15.0
     self.target_class = 7
     self.min_confidence = 18
     self.confirm_frames = 4
     self.lost_frames = 4
     self.stop_bottom_pct = 95.0
+    self.stage_bottom_pct = 75.0
+    self.contact_bottom_pct = 94.0
+    self.bearing_actuation_sign = 1.0
     self.reverse_angle = 30.0
     self.cam_timeout_ms = 5000
 
 
 class Config:
   def __init__(self):
-    self.target_speed = 50.0
     self.heading = PidGains(kp=2.0, ki=0.0, kd=0.0, max_out=50.0, deadband=1.0)
     self.tracking_bearing = PidGains(kp=1.5, ki=0.05, kd=0.0, max_out=60.0, deadband=0.02)
     self.tracking = TrackingParams()
@@ -47,18 +50,37 @@ class Config:
     self.mag_oz = 0.0
     # 比赛
     self.match_target_count = 3
-    self.start_layout = 0           # 0=预赛直推; 1=底边中; 2=左下; 3=右下; 4=左边中
+    self.match_mode = "final"        # "pre"=预赛直推; "final"=决赛绕行
+    self.start_layout = 0           # 0=底边中; 1=底边中; 2=左下; 3=右下; 4=左边中
     self.push_hdg_ref = 0.0         # 朝场心 H_ref
     self.hdg_off = [90.0, 0.0, -90.0]  # 按 cls_id: 沙袋/网球/熊
     self.match_order = [CLS_UP, CLS_LEFT, CLS_RIGHT]  # PICK 优先序
+    self.strict_target = False
+    self.single_target_class = CLS_UP
     self.drive_duty = 15.0
     self.push_duty = 12.0
+    # 实车标定: 三轮同正值使 yaw 减小，所以绝对航向执行极性为 -1。
+    self.yaw_actuation_sign = -1.0
+    self.orbit_speed = 12.0
+    self.orbit_direction_sign = 1.0
+    self.orbit_radial_kp = 0.6
+    self.orbit_radial_max = 10.0
+    self.orbit_timeout_ms = 8000
+    self.orbit_yaw_tol_deg = 8.0
+    self.orbit_center_tol_pct = 8.0
+    self.orbit_range_tol_pct = 7.0
+    self.orbit_confirm_frames = 4
+    self.orbit_lost_frames = 6
+    self.final_approach_timeout_ms = 5000
+    self.approach_cluster_timeout_ms = 15000
     self.drive_timeout_ms = 5000
     self.push_timeout_ms = 3000
     self.push_clear_ms = 200
     self.next_spin_ms = 1500
     self.home_timeout_ms = 12000
     self.align_tol_deg = 12.0
+    self.calibration_output = False
+    self.log_to_file = False
 
   def hdg_off_for(self, cls_id):
     i = int(cls_id)
@@ -70,8 +92,6 @@ class Config:
 
   def to_dict(self):
     return {
-      # 基础
-      "默认速度": float(self.target_speed),
       # 航向 PID
       "航向P": float(self.heading.kp),
       "航向I": float(self.heading.ki),
@@ -86,12 +106,16 @@ class Config:
       "跟踪死区": float(self.tracking_bearing.deadband),
       # 跟踪参数
       "接近速度": float(self.tracking.approach_speed),
+      "最终接近速度": float(self.tracking.final_approach_speed),
       "搜索速度": float(self.tracking.search_speed),
       "目标类别": int(self.tracking.target_class),
       "最低置信度": int(self.tracking.min_confidence),
       "确认帧数": int(self.tracking.confirm_frames),
       "丢失帧数": int(self.tracking.lost_frames),
       "停止位置": float(self.tracking.stop_bottom_pct),
+      "绕行起始位置": float(self.tracking.stage_bottom_pct),
+      "接触位置": float(self.tracking.contact_bottom_pct),
+      "视觉执行极性": float(self.tracking.bearing_actuation_sign),
       "倒车角度": float(self.tracking.reverse_angle),
       "相机超时": int(self.tracking.cam_timeout_ms),
       # 磁力计
@@ -102,17 +126,35 @@ class Config:
       # 比赛
       "目标个数": int(self.match_target_count),
       "发车位置": int(self.start_layout),
+      "比赛模式": str(self.match_mode),
       "场心航向": float(self.push_hdg_ref),
       "推箱偏角": [float(x) for x in self.hdg_off],
       "搜索顺序": [int(x) for x in self.match_order],
+      "严格目标": bool(self.strict_target),
+      "单车目标类别": int(self.single_target_class),
       "行驶占空比": float(self.drive_duty),
       "推箱占空比": float(self.push_duty),
+      "航向执行极性": float(self.yaw_actuation_sign),
+      "绕行速度": float(self.orbit_speed),
+      "绕行方向": float(self.orbit_direction_sign),
+      "绕行距离P": float(self.orbit_radial_kp),
+      "绕行距离上限": float(self.orbit_radial_max),
+      "绕行超时": int(self.orbit_timeout_ms),
+      "绕行航向容差": float(self.orbit_yaw_tol_deg),
+      "绕行居中容差": float(self.orbit_center_tol_pct),
+      "绕行距离容差": float(self.orbit_range_tol_pct),
+      "绕行确认帧数": int(self.orbit_confirm_frames),
+      "绕行丢失帧数": int(self.orbit_lost_frames),
+      "最终接近超时": int(self.final_approach_timeout_ms),
+      "绕物总超时": int(self.approach_cluster_timeout_ms),
       "行驶超时": int(self.drive_timeout_ms),
       "推箱超时": int(self.push_timeout_ms),
       "清线时间": int(self.push_clear_ms),
       "掉头超时": int(self.next_spin_ms),
       "回库超时": int(self.home_timeout_ms),
       "航向容差": float(self.align_tol_deg),
+      "标定输出": bool(self.calibration_output),
+      "日志保存": bool(self.log_to_file),
     }
 
   def _apply_dict(self, d):
@@ -125,11 +167,8 @@ class Config:
         print("[CONFIG] skip '%s': %s" % (k, e))
 
   def _set_one(self, k, v):
-    # 基础
-    if k == "默认速度":
-      self.target_speed = float(v)
     # 航向 PID
-    elif k == "航向P":
+    if k == "航向P":
       self.heading.kp = float(v)
     elif k == "航向I":
       self.heading.ki = float(v)
@@ -153,6 +192,8 @@ class Config:
     # 跟踪参数
     elif k == "接近速度":
       self.tracking.approach_speed = float(v)
+    elif k == "最终接近速度":
+      self.tracking.final_approach_speed = float(v)
     elif k == "搜索速度":
       self.tracking.search_speed = float(v)
     elif k == "目标类别":
@@ -165,6 +206,12 @@ class Config:
       self.tracking.lost_frames = int(v)
     elif k == "停止位置":
       self.tracking.stop_bottom_pct = float(v)
+    elif k == "绕行起始位置":
+      self.tracking.stage_bottom_pct = float(v)
+    elif k == "接触位置":
+      self.tracking.contact_bottom_pct = float(v)
+    elif k == "视觉执行极性":
+      self.tracking.bearing_actuation_sign = float(v)
     elif k == "倒车角度":
       self.tracking.reverse_angle = float(v)
     elif k == "相机超时":
@@ -183,16 +230,49 @@ class Config:
       self.match_target_count = int(v)
     elif k == "发车位置":
       self.start_layout = int(v)
+    elif k == "比赛模式":
+      v = str(v).strip().lower()
+      self.match_mode = "pre" if v in ("pre", "预赛") else "final"
     elif k == "场心航向":
       self.push_hdg_ref = float(v)
     elif k == "推箱偏角":
       self.hdg_off = [float(x) for x in v]
     elif k == "搜索顺序":
       self.match_order = [int(x) for x in v]
+    elif k == "严格目标":
+      self.strict_target = bool(v)
+    elif k == "单车目标类别":
+      self.single_target_class = int(v)
     elif k == "行驶占空比":
       self.drive_duty = float(v)
     elif k == "推箱占空比":
       self.push_duty = float(v)
+    elif k == "航向执行极性":
+      self.yaw_actuation_sign = float(v)
+    elif k == "绕行速度":
+      self.orbit_speed = float(v)
+    elif k == "绕行方向":
+      self.orbit_direction_sign = float(v)
+    elif k == "绕行距离P":
+      self.orbit_radial_kp = float(v)
+    elif k == "绕行距离上限":
+      self.orbit_radial_max = float(v)
+    elif k == "绕行超时":
+      self.orbit_timeout_ms = int(v)
+    elif k == "绕行航向容差":
+      self.orbit_yaw_tol_deg = float(v)
+    elif k == "绕行居中容差":
+      self.orbit_center_tol_pct = float(v)
+    elif k == "绕行距离容差":
+      self.orbit_range_tol_pct = float(v)
+    elif k == "绕行确认帧数":
+      self.orbit_confirm_frames = int(v)
+    elif k == "绕行丢失帧数":
+      self.orbit_lost_frames = int(v)
+    elif k == "最终接近超时":
+      self.final_approach_timeout_ms = int(v)
+    elif k == "绕物总超时":
+      self.approach_cluster_timeout_ms = int(v)
     elif k == "行驶超时":
       self.drive_timeout_ms = int(v)
     elif k == "推箱超时":
@@ -205,13 +285,22 @@ class Config:
       self.home_timeout_ms = int(v)
     elif k == "航向容差":
       self.align_tol_deg = float(v)
+    elif k == "标定输出":
+      self.calibration_output = bool(v)
+    elif k == "日志保存":
+      self.log_to_file = bool(v)
 
   @classmethod
   def load(cls, path=CONFIG_FILE):
     cfg = cls()
     try:
       with open(path, "r") as f:
-        cfg._apply_dict(json.load(f))
+        d = json.load(f)
+        if isinstance(d, dict):
+          cfg._apply_dict(d)
+        else:
+          print("[CONFIG] invalid JSON, reset to default")
+          cfg.save(path)
     except (OSError, ValueError):
       cfg.save(path)
     return cfg

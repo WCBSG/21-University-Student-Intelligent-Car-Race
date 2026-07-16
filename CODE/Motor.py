@@ -34,6 +34,9 @@ class MotionControl:
     正值=逆时针, 负值=顺时针, 0=停。
     返回当前速度列表。
     """
+    if len(duties) != len(self._motors):
+      print("[Motor] ERROR: expected %d duties, got %d" % (len(self._motors), len(duties)))
+      return self._speeds.copy()
     for i, d in enumerate(duties):
       d=self._clamp(int(d),-100,100);self._speeds[i]=d;ccw,cw=self._motors[i]
       if d>0:ccw.duty_u16(self._pct_to_pwm(d));sleep_us(76);cw.duty_u16(65535)

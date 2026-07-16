@@ -29,7 +29,6 @@ import tokenize
 # 不处理的目录和文件
 SKIP_DIR_NAMES = {".flash", "__pycache__", ".git", u"例程", u"[例程]Rt1021例程"}
 SKIP_FILE_NAMES = {
-    "calibrate_tcs.py",        # 标定脚本，不上车
 }
 
 
@@ -69,7 +68,6 @@ def strip_python(src_text):
     # ── 第 2 步: 行级后处理 ────────────────────────────────
     lines = text.split('\n')
     result = []
-    prev_blank = False
     in_triple = False
     triple_delim = None
     i = 0
@@ -117,14 +115,10 @@ def strip_python(src_text):
             i += 1
             continue
 
-        # 压缩空行
+        # 删除空行
         if not line:
-            if not prev_blank and result:
-                result.append('')
-                prev_blank = True
             i += 1
             continue
-        prev_blank = False
 
         result.append(line)
         i += 1
@@ -169,6 +163,32 @@ def should_skip_dir(name):
 
 def should_skip_file(name):
     return name in SKIP_FILE_NAMES
+
+
+def strip_json_comments(text):
+    """去掉 JSON 注释：独立行 "//…" / "__…" 整行删除；行内 ,"__…": value 移除。"""
+    # 匹配: ,"__key": <string|array|simple_value>
+    _INLINE = re.compile(
+        r'\s*,\s*"__[^"]*"\s*:\s*'
+        r'("(?:[^"\\]|\\.)*"|\[[^\]]*\]|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'
+    )
+    lines = text.split('\n')
+    kept = []
+    for line in lines:
+        s = line.strip()
+        # 整行注释（段标题 "//…" 或独立 __ 行）
+        if s.startswith('"//') or s.startswith('"__'):
+            continue
+        # 移除行内 __ 注释
+        line = _INLINE.sub('', line)
+        if not line.strip():
+            continue
+        kept.append(line)
+    text = '\n'.join(kept)
+    # 修复尾随逗号
+    text = re.sub(r',\s*\n\s*}', '\n}', text)
+    text = re.sub(r',\s*\n\s*]', '\n]', text)
+    return text
 
 
 def process_tree(src_root, dst_root):
@@ -219,7 +239,17 @@ def process_tree(src_root, dst_root):
                     n_err += 1
                     print("[ERR] %s: %s" % (src_path, e))
             elif name.endswith(".json"):
-                shutil.copy2(src_path, dst_path)
+                try:
+                    with open(src_path, "r", encoding="utf-8") as f:
+                        raw = f.read()
+                    stripped = strip_json_comments(raw)
+                    with open(dst_path, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(stripped)
+                    bytes_in += len(raw.encode("utf-8"))
+                    bytes_out += len(stripped.encode("utf-8"))
+                except Exception as e:
+                    n_err += 1
+                    print("[ERR] %s: %s" % (src_path, e))
 
     return n_py, n_skip, n_err, bytes_in, bytes_out
 

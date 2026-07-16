@@ -319,11 +319,16 @@ class ImuSensor:
 
     # 磁力计 (仅 963)
     self._mag_enabled = False      # MATCH 默认关
-    self._mag_alpha = 0.01         # 互补滤波系数
+    self._mag_alpha = 0.002        # 静止慢纠
+    self._mag_dead = 2.2           # |diff| 小于此：磁噪声，不纠
+    self._mag_pull_max = 6.7       # |diff| 大于此：软铁/磁漂，信陀螺
+    self._mag_still_need = 50     # 静止满 0.5s 才融合（防停稳后磁乱跳）
     self._mag_off = [0.0, 0.0, 0.0]  # 硬铁偏移
     self._mx = 0.0; self._my = 0.0; self._mz = 0.0
     self._gyro_yaw = 0.0           # 纯陀螺累积 yaw (deg), ISR 写
     self._fused_offset = 0.0       # mag 修正累积 (deg), 主循环写
+    self._mag_ref = None           # 标定完成时磁航向；融合用相对量，不锁磁北
+    self._mag_rel_lpf = None       # 相对磁航向低通，抗尖峰
     self._gyro_dps = 0.0           # 陀螺模长 (deg/s), 用于 ω 门控
     self._motor_on = False         # 主循环每拍: arbiter.motors_active
 
@@ -331,8 +336,12 @@ class ImuSensor:
     """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
     d = self.data
     # 963: [ax,ay,az,gx,gy,gz,mx,my,mz]；660: 无 mag — 统一取前 6
+    # ★ 一次性读取全部原始值，避免 DMA ISR 在读取间隙更新缓冲区
     ax_raw, ay_raw, az_raw = d[0], d[1], d[2]
     gx_raw, gy_raw, gz_raw = d[3], d[4], d[5]
+    _mx = d[6] if self.model == "963" and len(d) >= 9 else 0
+    _my = d[7] if self.model == "963" and len(d) >= 9 else 0
+    _mz = d[8] if self.model == "963" and len(d) >= 9 else 0
 
     ax = _acc_to_g(ax_raw)
     ay = _acc_to_g(ay_raw)
@@ -355,6 +364,11 @@ class ImuSensor:
                       self._calib_gz / n]
         self._calibrated = True
         self._filter.reset()
+        # 标定零点：陀螺/融合从 0 起；磁参考下一拍锁定，避免拉向磁北
+        self._gyro_yaw = 0.0
+        self._fused_offset = 0.0
+        self._mag_ref = None
+        self._mag_rel_lpf = None
       return
 
     gx -= self._bias[0]
@@ -386,13 +400,37 @@ class ImuSensor:
 
     # 磁力计快照 (仅 963；始终更新，便于标定/菜单；融合仍看 mag_enabled)
     if self.model == "963":
-      self._mx = d[6] - self._mag_off[0]
-      self._my = d[7] - self._mag_off[1]
-      self._mz = d[8] - self._mag_off[2]
+      self._mx = _mx - self._mag_off[0]
+      self._my = _my - self._mag_off[1]
+      self._mz = _mz - self._mag_off[2]
 
     # 纯陀螺 yaw 累积 (用于互补融合)
     self._gyro_yaw += gz * self._filter.dt * RAD_TO_DEG
     self._gyro_yaw = self._normalize_angle(self._gyro_yaw)
+
+    # ★ 磁融合：静止≥1s；对 mrel 低通；死区 2.2°～5.5° 才慢纠
+    #   你转完停在 +4.6 时 yaw≈mrel 已很好；之后 mag 原地漂到 +13 不应再拽 yaw
+    if self._mag_enabled and self.model == "963":
+      if (self._still_count >= self._mag_still_need
+          and not self._motor_on and self._gyro_dps < 0.5):
+        mag = self._mag_heading_from_q(
+          self._filter.q0, self._filter.q1, self._filter.q2, self._filter.q3)
+        if mag is not None:
+          prev = self._normalize_angle(self._gyro_yaw + self._fused_offset)
+          if self._mag_ref is None:
+            self._mag_ref = self._normalize_angle(mag - prev)
+            self._mag_rel_lpf = 0.0
+          mag_rel = self._normalize_angle(mag - self._mag_ref)
+          if self._mag_rel_lpf is None:
+            self._mag_rel_lpf = mag_rel
+          else:
+            self._mag_rel_lpf = self._normalize_angle(
+              self._mag_rel_lpf + 0.04 * self._normalize_angle(
+                mag_rel - self._mag_rel_lpf))
+          diff = self._normalize_angle(self._mag_rel_lpf - prev)
+          ad = abs(diff)
+          if self._mag_dead <= ad <= self._mag_pull_max:
+            self._fused_offset += self._mag_alpha * diff
 
     f = self._filter
     off = self._snap_idx * 5  # 每槽 5 个 float
@@ -420,7 +458,7 @@ class ImuSensor:
     if not self._calibrated:
       return 0.0
     if self._mag_enabled:
-      yaw, _ = self.get_fused_yaw(motor_on=motor_on)
+      yaw, _ = self.get_fused_yaw(motor_on=motor_on, apply=False)
       return yaw
     q0, q1, q2, q3, _ = self._read_snap()
     yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
@@ -459,58 +497,60 @@ class ImuSensor:
       return None
     if not self._calibrated:
       return None
+    q0, q1, q2, q3, _ = self._read_snap()
+    return self._mag_heading_from_q(q0, q1, q2, q3)
+
+  def _mag_heading_from_q(self, q0, q1, q2, q3):
+    """用给定四元数做倾角补偿后算磁航向（供 update@100Hz 调用）。"""
     mx, my, mz = self._mx, self._my, self._mz
     if abs(mx) < 1 and abs(my) < 1:
-      return None  # mag 数据太弱
-
-    roll = self.get_roll() * DEG_TO_RAD
-    pitch = self.get_pitch() * DEG_TO_RAD
+      return None
+    sin_pitch = 2.0 * (q0 * q1 - q2 * q3)
+    if abs(sin_pitch) > 1.0:
+      sin_pitch = 1.0 if sin_pitch > 0 else -1.0
+    pitch = math.asin(sin_pitch)
+    roll = math.atan2(2.0 * (q0 * q2 + q1 * q3),
+                      1.0 - 2.0 * (q1 * q1 + q2 * q2))
     cos_r, sin_r = math.cos(roll), math.sin(roll)
     cos_p, sin_p = math.cos(pitch), math.sin(pitch)
-
-    # 倾角补偿：把磁矢量投到水平面
     mx_h = mx * cos_p + mz * sin_p
     my_h = mx * sin_r * sin_p + my * cos_r - mz * sin_r * cos_p
+    # 取 −my：与陀螺正 yaw（车体系右转）同向；实测转圈时 mrel≈−yaw
+    return self._normalize_angle(math.atan2(-my_h, mx_h) * RAD_TO_DEG)
 
-    heading = math.atan2(my_h, mx_h) * RAD_TO_DEG  # Y右系
-    return self._normalize_angle(heading)
+  def get_mag_rel(self):
+    """相对磁航向 (deg)：标定零点为 0。未锁定参考时返回 None。"""
+    mag = self.get_mag_heading()
+    if mag is None or self._mag_ref is None:
+      return None
+    return self._normalize_angle(mag - self._mag_ref)
 
-  def get_fused_yaw(self, motor_on=False, alpha=None, apply=True):
+  def get_fused_yaw(self, motor_on=False, alpha=None, apply=False):
     """
-    互补融合航向角 (deg)。apply=True → 写回 _fused_offset 使修正持续累积。
-    apply=False → 只读显示（菜单/调试用，不改变状态）。
-    motor_on 或 |ω|>5°/s → α=0; 静止/低速 → α 融合磁。
-    返回 (yaw, source): source='fused'|'gyro'。
+    读融合航向。offset 在 update()@100Hz 更新；此处默认只读。
+    融合目标是 mag_rel（相对标定零点），不是绝对磁北。
     """
     gyro = self.get_gyro_yaw()
-    if not self._mag_enabled:
-      return gyro, "gyro"
-    if self.model not in ("660", "963"):
-      return gyro, "gyro"
-
-    mag = self.get_mag_heading()
-    if mag is None:
-      return gyro, "gyro"
-
-    # 自适应 α
-    if alpha is not None:
-      a = alpha
-    elif motor_on or self._motor_on or self._gyro_dps > 5.0:
-      a = 0.0
-    else:
-      a = self._mag_alpha
-
-    prev = gyro + self._fused_offset
-
-    if a <= 0.0:
-      return prev, "gyro"
-
-    # 互补: offset += α·(mag − fused_prev)
-    diff = self._normalize_angle(mag - prev)
+    fused = self._normalize_angle(gyro + self._fused_offset)
+    if not self._mag_enabled or self.model not in ("660", "963"):
+      return fused, "gyro"
+    if motor_on or self._motor_on or self._gyro_dps >= 0.5:
+      return fused, "gyro"
+    mag_rel = self.get_mag_rel()
+    if mag_rel is None:
+      return fused, "gyro"
+    diff = self._normalize_angle(mag_rel - fused)
+    ad = abs(diff)
+    if ad < self._mag_dead or ad > self._mag_pull_max:
+      return fused, "gyro"
+    if self._still_count < self._mag_still_need:
+      return fused, "gyro"
     if apply:
-      self._fused_offset += a * diff
-    fused = gyro + self._fused_offset if apply else prev + a * diff
-    return self._normalize_angle(fused), "fused"
+      a = self._mag_alpha if alpha is None else alpha
+      if a > 0.0:
+        self._fused_offset += a * diff
+        fused = self._normalize_angle(gyro + self._fused_offset)
+    return fused, "fused"
 
   # ——————————————————————————————————————————————————————————
   #                      磁力计参数
@@ -525,13 +565,13 @@ class ImuSensor:
     was_on = self._mag_enabled
     self._mag_enabled = bool(v)
     if self._mag_enabled and not was_on:
-      # ★ 开启时对齐 offset，使 fused = Madgwick yaw，避免跳变
-      q0, q1, q2, q3, _ = self._read_snap()
-      madgwick = math.atan2(2.0 * (q0 * q3 + q1 * q2),
-                            1.0 - 2.0 * (q2 * q2 + q3 * q3)) * RAD_TO_DEG
-      self._fused_offset = self._normalize_angle(madgwick - self.get_gyro_yaw())
+      # 相对融合：下一拍用当前磁航向锁定参考，使 mag_rel≈当前 fused
+      self._mag_ref = None
+      self._mag_rel_lpf = None
     elif not self._mag_enabled:
       self._fused_offset = 0.0
+      self._mag_ref = None
+      self._mag_rel_lpf = None
 
   @property
   def mag_data(self):
@@ -613,4 +653,6 @@ class ImuSensor:
     self._still_count = 0
     self._gyro_yaw = 0.0
     self._fused_offset = 0.0
+    self._mag_ref = None
+    self._mag_rel_lpf = None
     self._calibrated = False

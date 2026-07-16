@@ -53,7 +53,7 @@ class Debouncer:
   """连续满足 condition 达 threshold 次 → ready。"""
   def __init__(self, threshold):
     self._n = 0
-    self._thr = int(threshold) if threshold else 1
+    self._thr = int(threshold)
 
   def reset(self):
     self._n = 0
@@ -194,6 +194,9 @@ class RobotFSM:
 
   def on_camera_frame(self, has_target, y2=0.0):
     stop_pct = self._cfg.tracking.stop_bottom_pct
+    # 决赛需先停在目标前方绕到正确推送侧；预赛仍直接接近接触位置。
+    if getattr(self._cfg, "match_mode", "final") != "pre":
+      stop_pct = self._cfg.tracking.stage_bottom_pct
     if self.state == SEARCH:
       self._confirm.tick(has_target)
       if self._confirm.ready():

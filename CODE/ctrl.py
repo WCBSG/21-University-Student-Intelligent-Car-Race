@@ -22,6 +22,10 @@ class MotorArbiter:
   def owner(self): return self._owner
 
   @property
+  def duties(self):
+    return self._d0, self._d1, self._d2
+
+  @property
   def motors_active(self):
     return abs(self._d0) > 1.0 or abs(self._d1) > 1.0 or abs(self._d2) > 1.0
 
@@ -86,12 +90,15 @@ class HeadingPID:
     self._integral += error * dt
     d = (error - self._prev_error) / dt if dt > 1e-6 else 0.0
     out = kp * error + ki * self._integral + kd * d
+    # 反算钳位：输出饱和时立即修正积分，避免恢复缓慢
     if out > mx:
       out = mx
-      if ki > 0 and error * self._integral > 0: self._integral -= error * dt
+      if ki > 1e-9:
+        self._integral = (mx - kp * error - kd * d) / ki
     elif out < -mx:
       out = -mx
-      if ki > 0 and error * self._integral > 0: self._integral -= error * dt
+      if ki > 1e-9:
+        self._integral = (-mx - kp * error - kd * d) / ki
     self._prev_error = error
     return out
 
@@ -177,7 +184,8 @@ class TrackApproachMode(Mode):
     real_dt = ticks_diff(now, self._last_ms) / 1000.0
     if real_dt <= 0.0 or real_dt > 0.5: real_dt = 0.1
     self._last_ms = now
-    rot = -self._pid.update(be, real_dt)
+    # 实车标定：目标在右侧(be>0)时需要三轮正修正，使车顺时针右转。
+    rot = self._cfg.tracking.bearing_actuation_sign * self._pid.update(be, real_dt)
     fwd = MotionControl.move(self._cfg.tracking.approach_speed, 0.0)
     self._arb.write(self.id, [_clamp(fwd[i] + rot, -100, 100) for i in range(3)])
 
