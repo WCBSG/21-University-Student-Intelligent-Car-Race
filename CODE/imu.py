@@ -55,7 +55,9 @@ class MagCalib:
   菜单里反复 feed(raw)；完成后 offset → set_mag_offset + 存 config。
   """
 
-  def __init__(self):
+  def __init__(self, min_samples=50, min_span=80.0):
+    self._min_samples = int(min_samples)
+    self._min_span = float(min_span)
     self.reset()
 
   def reset(self):
@@ -90,7 +92,7 @@ class MagCalib:
   def ready(self):
     """水平面有足够椭圆跨度才认为转过一圈。"""
     dx, dy = self.span_xy
-    return self.n >= 50 and dx > 80.0 and dy > 80.0
+    return self.n >= self._min_samples and dx > self._min_span and dy > self._min_span
 
   @property
   def offset(self):
@@ -316,6 +318,8 @@ class ImuSensor:
     self._bias_alpha = 0.002
     self._still_count = 0
     self._still_needed = 50
+    self._gyro_still = 0.0175
+    self._acc_still = 0.05
 
     # 磁力计 (仅 963)
     self._mag_enabled = False      # MATCH 默认关
@@ -384,7 +388,7 @@ class ImuSensor:
     gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
     self._gyro_dps = gyro_mag * RAD_TO_DEG  # ω 门控用
     acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
-    is_still = (gyro_mag < 0.0175) and (abs(acc_mag - 1.0) < 0.05)
+    is_still = (gyro_mag < self._gyro_still) and (abs(acc_mag - 1.0) < self._acc_still)
 
     if is_still:
       self._still_count += 1
@@ -583,6 +587,21 @@ class ImuSensor:
 
   def set_mag_alpha(self, alpha):
     self._mag_alpha = max(0.0, min(0.1, alpha))
+
+  def set_fusion_params(self, gyro_still=0.0175, acc_still=0.05,
+                         bias_alpha=0.002, mag_alpha=0.002,
+                         mag_dead=2.2, mag_pull_max=6.7, mag_still_need=50):
+    self._gyro_still = float(gyro_still)
+    self._acc_still = float(acc_still)
+    self._bias_alpha = float(bias_alpha)
+    self._mag_alpha = float(mag_alpha)
+    self._mag_dead = float(mag_dead)
+    self._mag_pull_max = float(mag_pull_max)
+    self._mag_still_need = int(mag_still_need)
+
+  def set_mag_calib_params(self, min_samples=50, min_span=80.0):
+    self._mag_calib_min_samples = int(min_samples)
+    self._mag_calib_min_span = float(min_span)
 
   # ——————————————————————————————————————————————————————————
   #                      工具

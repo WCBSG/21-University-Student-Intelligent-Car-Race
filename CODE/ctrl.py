@@ -3,6 +3,7 @@ ctrl.py — 电机仲裁 + 航向PID + 视觉跟踪模式（三合一）
 """
 
 from time import ticks_ms, ticks_diff
+from log import info
 from Motor import MotionControl
 from fsm import Mode, SEARCH, TRACK, COMPLETE, FAULT
 
@@ -49,7 +50,7 @@ class MotorArbiter:
     now = ticks_ms()
     if ticks_diff(now, self._last_owner_warn_ms) >= 1000:
       self._last_owner_warn_ms = now
-      print("[ARB] reject write owner=%s caller=%s" % (self._owner, cid))
+      info("ARB", "reject write owner=%s caller=%s" % (self._owner, cid))
     return False
 
   def hold_brake(self, cid):
@@ -155,7 +156,10 @@ class TrackSearchMode(Mode):
       return
     if self._robot.search_phase == "reverse":
       yaw = self._imu.get_yaw()
-      self._rev_acc += abs(_norm(yaw - self._rev_start_yaw))
+      d = yaw - self._rev_start_yaw
+      while d > 180.0: d -= 360.0
+      while d < -180.0: d += 360.0
+      self._rev_acc += abs(d)
       self._rev_start_yaw = yaw
       if self._rev_acc >= self._cfg.tracking.reverse_angle:
         self._robot.search_phase = "spin"; self._rev_acc = 0.0
@@ -187,7 +191,7 @@ class TrackApproachMode(Mode):
     # 实车标定：目标在右侧(be>0)时需要三轮正修正，使车顺时针右转。
     rot = self._cfg.tracking.bearing_actuation_sign * self._pid.update(be, real_dt)
     fwd = MotionControl.move(self._cfg.tracking.approach_speed, 0.0)
-    self._arb.write(self.id, [_clamp(fwd[i] + rot, -100, 100) for i in range(3)])
+    self._arb.write(self.id, [max(-100, min(100, fwd[i] + rot)) for i in range(3)])
 
 
 class CompleteMode(Mode):
@@ -204,16 +208,3 @@ class FaultMode(Mode):
   def update(self, dt, sensors): pass
 
 
-# =============================================================================
-#                              工具函数
-# =============================================================================
-
-def _norm(a):
-  while a > 180.0: a -= 360.0
-  while a < -180.0: a += 360.0
-  return a
-
-def _clamp(v, lo, hi):
-  if v < lo: return lo
-  if v > hi: return hi
-  return v

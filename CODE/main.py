@@ -9,134 +9,74 @@ main.py — 纯比赛固件（无 Menu / 无 LCD）
 
 from machine import Pin, UART
 from time import sleep_ms, ticks_ms, ticks_diff
-import gc, os
+import gc
+from log import info, setup as log_setup
 
 LED = Pin('C4', Pin.OUT, pull=Pin.PULL_UP_47K, value=True)
 C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
 
 
-def _log(msg, tag="MAIN"):
-  print("[%s] %s" % (tag, msg))
-
-
 def _mem(tag):
   gc.collect()
-  print("[MEM] %s free=%d" % (tag, gc.mem_free()))
-
-
-# =============================================================================
-#                      LogFile — print 副本写入 /flash/log.txt
-# =============================================================================
-class _LogFile:
-  MAX_KB = 64
-
-  def __init__(self, path='/flash/log.txt'):
-    self._path = path
-    self._enabled = False
-    self._buf = ''
-
-  @property
-  def enabled(self):
-    return self._enabled
-
-  @enabled.setter
-  def enabled(self, v):
-    self._enabled = bool(v)
-
-  def write_line(self, line):
-    if not self._enabled:
-      return
-    self._buf += line
-    if '\n' in self._buf:
-      try:
-        with open(self._path, 'a') as f:
-          f.write(self._buf)
-      except Exception:
-        pass
-      self._buf = ''
-      # 超 64KB 截断
-      try:
-        st = os.stat(self._path)
-        if st[6] > self.MAX_KB * 1024:
-          os.remove(self._path)
-      except Exception:
-        pass
-
-  def close(self):
-    if self._buf:
-      try:
-        with open(self._path, 'a') as f:
-          f.write(self._buf)
-      except Exception:
-        pass
-      self._buf = ''
-
-
-_log_file = _LogFile()
-_print = print
-
-
-def print(*args, **kwargs):
-  _print(*args, **kwargs)
-  try:
-    sep = kwargs.get('sep', ' ')
-    end = kwargs.get('end', '\n')
-    _log_file.write_line(sep.join(str(a) for a in args) + end)
-  except Exception:
-    pass
+  info("MEM", "%s free=%d" % (tag, gc.mem_free()))
 
 
 # =============================================================================
 #                              硬件 / 模块初始化
 # =============================================================================
-_log("Motors...")
+info("MAIN", "Motors...")
 from Motor import MotionControl
 motors = MotionControl()
-from ctrl import MotorArbiter
+from ctrl import MotorArbiter, select_target
 arbiter = MotorArbiter(motors)
 
-_log("Config...")
+info("MAIN", "Config...")
 from config import config as cfg, load_config
 load_config()
-_log_file.enabled = cfg.log_to_file
+log_setup(cfg.debug_output)
 
 # —— 提前 import 大模块（fsm + runner），趁 RAM 充裕时完成解析编译 ——
 # 实例化延后到所有硬件就绪之后
-_log("FSM + Runner import...")
-gc.collect()
+info("MAIN", "FSM + Runner import...")
 _mem("pre-fsm")
 from fsm import build_robot
 from runner import MatchRunner
 _mem("post-runner")
 
-_log("IMU963...")
+info("MAIN", "IMU963...")
 from imu import ImuSensor
-imu = ImuSensor(calibrate_samples=100, beta=0.05, model="963")
+imu = ImuSensor(calibrate_samples=int(cfg.imu_calibrate_samples),
+                beta=float(cfg.imu_beta), model="963")
 imu.set_mag_offset(cfg.mag_ox, cfg.mag_oy, cfg.mag_oz)
 imu.mag_enabled = cfg.mag_enabled
-_log("IMU model=%s mag=%s calibrating..." % (
-  imu.model, "ON" if imu.mag_enabled else "OFF"), "IMU")
+imu.set_fusion_params(
+  gyro_still=float(cfg.imu_gyro_still),
+  acc_still=float(cfg.imu_acc_still),
+  bias_alpha=float(cfg.imu_bias_alpha),
+  mag_alpha=float(cfg.imu_mag_alpha),
+  mag_dead=float(cfg.imu_mag_dead),
+  mag_pull_max=float(cfg.imu_mag_pull_max),
+  mag_still_need=int(cfg.imu_mag_still_need))
+imu.set_mag_calib_params(
+  min_samples=int(cfg.imu_mag_calib_min_samples),
+  min_span=float(cfg.imu_mag_calib_min_span))
+info("IMU", "IMU model=%s mag=%s calibrating..." % (
+  imu.model, "ON" if imu.mag_enabled else "OFF"))
 _mem("imu")
 
 from smartcar import ticker
-_tick_n = 0
-
 
 _imu_err_n = 0
 
 
 def _on_tick(_):
-  global _tick_n, _imu_err_n
-  _tick_n += 1
+  global _imu_err_n
   try:
     imu.update()
   except Exception as e:
     _imu_err_n += 1
     if _imu_err_n <= 3:
-      print("[IMU] update err: %s" % e)
-  if _tick_n >= 100:
-    _tick_n = 0
-    gc.collect()
+      info("IMU", "update err: %s" % e)
 
 
 tkr = ticker(1)
@@ -144,19 +84,23 @@ tkr.capture_list(imu.raw)
 tkr.callback(_on_tick)
 tkr.start(10)
 
-_log("Camera UART5...")
+info("MAIN", "Camera UART5...")
 from camera import CameraRx
-from ctrl import select_target
 camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking.cam_timeout_ms)
 
-_log("TCS...")
+info("MAIN", "TCS...")
 from tcs3472 import TCS3472, make_i2c
 tcs = TCS3472(make_i2c())
+tcs.confirm_n = int(cfg.tcs_confirm_n)
+tcs.yellow_r_min = float(cfg.tcs_r_min)
+tcs.yellow_g_min = float(cfg.tcs_g_min)
+tcs.yellow_b_max = float(cfg.tcs_b_max)
+tcs.yellow_c_min = int(cfg.tcs_c_min)
 _mem("tcs")
 
 # —— 实例化（所有硬件依赖已就绪） ——
-_log("FSM + Match build...")
-gc.collect()
+info("MAIN", "FSM + Match build...")
+_mem("pre-build")
 robot = build_robot(arbiter, cfg, imu)
 match = MatchRunner(robot, arbiter, tcs, cfg)
 _mem("ready")
@@ -168,15 +112,17 @@ _has_target = False
 _target = None
 _y2 = 0.0
 _filt_ms = 0
+_ghost_n = 0
 
 
 def _build_sensors():
-  global _has_target, _target, _y2, _filt_ms
+  global _has_target, _target, _y2, _filt_ms, _ghost_n
   new_frame = False
   cam_timeout = False
   if camera.is_ready:
     frame = camera.poll()
     if frame is not None:
+      _ghost_n = 0
       new_frame = True
       raw_n = frame.num
       _has_target = frame.has_target
@@ -192,10 +138,16 @@ def _build_sensors():
           if raw_n > 0 and ticks_diff(now, _filt_ms) > 1000:
             _filt_ms = now
             d0 = frame.detections[0]
-            print("[CAM] filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
+            info("CAM", "filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
               raw_n, int(d0[0]), int(d0[1]),
               cfg.tracking.target_class, getattr(cfg, "match_allow", None)))
       else:
+        _target = None
+        _y2 = 0.0
+    else:
+      _ghost_n += 1
+      if _ghost_n >= 3:
+        _has_target = False
         _target = None
         _y2 = 0.0
     cam_timeout = camera.timed_out
@@ -203,6 +155,7 @@ def _build_sensors():
     _has_target = False
     _target = None
     _y2 = 0.0
+    _ghost_n = 0
 
   crossed = False
   on_line = False
@@ -233,7 +186,7 @@ while C20.value() == 0:
   sleep_ms(20)
 
 # —— IMU 标定（超时 10s） ——
-_log("Wait IMU calib...", "BOOT")
+info("BOOT", "Wait IMU calib...")
 LED.high()
 _imu_t0 = ticks_ms()
 while not imu.is_calibrated:
@@ -244,39 +197,39 @@ while not imu.is_calibrated:
 LED.low()
 _imu_ok = imu.is_calibrated
 if _imu_ok:
-  _log("IMU calibrated yaw=%.1f" % imu.get_yaw(), "BOOT")
+  info("BOOT", "IMU calibrated yaw=%.1f" % imu.get_yaw())
 else:
-  _log("IMU calibration TIMEOUT — fast LED blink", "BOOT")
+  info("BOOT", "IMU calibration TIMEOUT — fast LED blink")
 
 # —— 摄像头握手 ——
-_log("Camera handshake...", "BOOT")
+info("BOOT", "Camera handshake...")
 _hs = False
 for retry in range(1, 41):
   LED.value(0 if (ticks_ms() % 1000) < 500 else 1)
   if camera.handshake(retries=1, retry_ms=80):
     camera.set_ready()
     _hs = True
-    _log("Camera OK (try %d)" % retry, "BOOT")
+    info("BOOT", "Camera OK (try %d)" % retry)
     break
   if camera.failed:
-    _log("Camera self-test FAIL", "BOOT")
+    info("BOOT", "Camera self-test FAIL")
     break
   sleep_ms(50)
 _cam_ok = _hs
 if not _hs:
-  _log("Camera handshake TIMEOUT — slow LED blink", "BOOT")
+  info("BOOT", "Camera handshake TIMEOUT — slow LED blink")
 else:
   camera.set_ready()
 
 LED.low()
 if _imu_ok and _cam_ok:
-  _log("======== READY: short-press C20 to START ========", "BOOT")
-  _log("layout=%d N=%d duty=%.0f" % (
-    cfg.start_layout, cfg.match_target_count, cfg.drive_duty), "BOOT")
+  info("BOOT", "======== READY: short-press C20 to START ========")
+  info("BOOT", "layout=%d N=%d duty=%.0f" % (
+    cfg.start_layout, cfg.match_target_count, cfg.drive_duty))
 elif not _imu_ok:
-  _log("======== IMU FAILED — check sensor ========", "BOOT")
+  info("BOOT", "======== IMU FAILED — check sensor ========")
 if not _cam_ok:
-  _log("======== CAMERA FAILED — start locked ========", "BOOT")
+  info("BOOT", "======== CAMERA FAILED — start locked ========")
 _mem("loop")
 
 # =============================================================================
@@ -290,6 +243,7 @@ _last_ms = ticks_ms()
 _last_stat_ms = ticks_ms()
 _last_cal_ms = ticks_ms()
 _loop = 0
+_gc_n = 0
 _last_match_phase = ""
 _cam_retry_ms = 0
 
@@ -299,7 +253,7 @@ while True:
   if dt <= 0.0 or dt > 0.5:
     dt = 0.02
     if _loop > 10:  # 跳过启动阶段
-      print("[MAIN] WARN: dt=%.2fs clamped → 0.02" % (ticks_diff(now, _last_ms) / 1000.0))
+      info("MAIN", "WARN: dt=%.2fs clamped → 0.02" % (ticks_diff(now, _last_ms) / 1000.0))
   _last_ms = now
   _loop += 1
 
@@ -313,19 +267,19 @@ while True:
       if phase in ("RUN", "FAULT"):
         match.stop()
         phase = "IDLE"
-        _log("ABORT by C20 → IDLE", "MATCH")
+        info("MATCH", "ABORT by C20 → IDLE")
       elif phase in ("IDLE", "DONE"):
         if not _imu_ok:
-          _log("IMU FAILED — cannot start", "MATCH")
+          info("MATCH", "IMU FAILED — cannot start")
         elif camera.failed:
-          _log("Camera FAILED — cannot start", "MATCH")
+          info("MATCH", "Camera FAILED — cannot start")
         elif not camera.is_ready:
-          _log("Camera not ready — cannot start", "MATCH")
+          info("MATCH", "Camera not ready — cannot start")
         elif match.start():
           phase = "RUN"
-          _log("GO! scored reset", "MATCH")
+          info("MATCH", "GO! scored reset")
         else:
-          _log("start refused phase=%s" % match.phase, "MATCH")
+          info("MATCH", "start refused phase=%s" % match.phase)
     c20_down_ms = 0
   c20_last = c20_now
 
@@ -335,7 +289,7 @@ while True:
     if camera.handshake(retries=1, retry_ms=80):
       camera.set_ready()
       _cam_ok = True
-      _log("Camera recovered!", "BOOT")
+      info("BOOT", "Camera recovered!")
 
   # —— 业务 ——
   sensors = _build_sensors()
@@ -347,14 +301,14 @@ while True:
     LED.low()
     if match.phase != _last_match_phase:
       _last_match_phase = match.phase
-      _log("%s robot=%s scored=%d" % (
-        match.info, robot.state, match.scored_count), "MATCH")
+      info("MATCH", "%s robot=%s scored=%d" % (
+        match.info, robot.state, match.scored_count))
     if not match.is_running and match.phase == "DONE":
       phase = "DONE"
-      _log("DONE scored=%d — C20 to run again" % match.scored_count, "MATCH")
+      info("MATCH", "DONE scored=%d — C20 to run again" % match.scored_count)
     elif match.phase == "FAULT":
       phase = "FAULT"
-      _log("FAULT: %s — C20 to acknowledge" % match.fault_reason, "MATCH")
+      info("MATCH", "FAULT: %s — C20 to acknowledge" % match.fault_reason)
   elif phase == "DONE":
     # 闪烁提示完赛
     LED.value(0 if ((now // 150) % 8) < 3 else 1)
@@ -377,10 +331,10 @@ while True:
     yaw = imu.get_yaw()
     ht = "Y" if sensors.get("has_target") else "N"
     yl = "Y" if sensors.get("tcs_on_line") else "N"
-    print("[STAT] %s match=%s robot=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
+    info("STAT", "%s match=%s robot=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
      phase, match.info, robot.state, yaw, ht, yl, gc.mem_free()))
 
-  if cfg.calibration_output and ticks_diff(now, _last_cal_ms) >= 500:
+  if cfg.debug_output and ticks_diff(now, _last_cal_ms) >= 500:
     _last_cal_ms = now
     target = sensors.get("target")
     mx, my, mz = imu.mag_data
@@ -389,19 +343,23 @@ while True:
     mrel_s = "n/a" if mrel is None else "%+.1f" % mrel
     m_on = "M" if arbiter.motors_active else "."
     if target is None:
-      print("[CAL] yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s target=NONE" % (
+      info("CAL", "yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s target=NONE" % (
         yaw, mrel_s, mx, my, mz, src, m_on))
     else:
-      print("[CAL] yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s cls=%d score=%d cx=%.1f y2=%.1f area=%.1f" % (
+      info("CAL", "yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s cls=%d score=%d cx=%.1f y2=%.1f area=%.1f" % (
         yaw, mrel_s, mx, my, mz, src, m_on, int(target[0]), int(target[1]),
         float(target[6]), float(target[9]), float(target[8])))
     nav = match.navigation_snapshot(sensors)
     d0, d1, d2 = arbiter.duties
-    print("[NAV] phase=%s/%s yaw=%+.1f tgt=%+.1f err=%+.1f cx=%.1f y2=%.1f cmd=(%+.1f,%+.1f,%+.1f) pwm=(%+.1f,%+.1f,%+.1f) owner=%s conf=%d lost=%d" % (
+    info("NAV", "phase=%s/%s yaw=%+.1f tgt=%+.1f err=%+.1f cx=%.1f y2=%.1f cmd=(%+.1f,%+.1f,%+.1f) pwm=(%+.1f,%+.1f,%+.1f) owner=%s conf=%d lost=%d" % (
       nav[0], nav[1] or "-", nav[2], nav[3], nav[4], nav[5], nav[6],
       nav[7], nav[8], nav[9], d0, d1, d2, arbiter.owner or "-",
       nav[10], nav[11]))
     tcs.debug_print()
-    gc.collect()
+
+  _gc_n += 1
+  if _gc_n >= 100:
+    _gc_n = 0
+    _mem("loop")
 
   sleep_ms(20)

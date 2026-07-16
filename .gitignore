@@ -1,2 +1,4 @@
 __pycache__/
 CODE/.flash/
+CODE/log.txt
+tools/verify_firmware.result.txt

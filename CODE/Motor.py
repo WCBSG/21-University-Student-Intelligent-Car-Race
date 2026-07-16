@@ -23,7 +23,6 @@ class MotionControl:
       (PWM('D5', 13000, duty_u16=0), PWM('D4', 13000, duty_u16=0)),
       (PWM('C28', 13000, duty_u16=0), PWM('C29', 13000, duty_u16=0)),
     ]
-    self._speeds = [0, 0, 0]
 
   # ——————————————————————————————————————————————————————————
   #                         电机控制
@@ -32,45 +31,19 @@ class MotionControl:
     """
     设置三路电机占空比 [-100, 100]。
     正值=逆时针, 负值=顺时针, 0=停。
-    返回当前速度列表。
+    ! 传入数组不应大于电机数,这里不作校验
     """
-    if len(duties) != len(self._motors):
-      print("[Motor] ERROR: expected %d duties, got %d" % (len(self._motors), len(duties)))
-      return self._speeds.copy()
     for i, d in enumerate(duties):
-      d=self._clamp(int(d),-100,100);self._speeds[i]=d;ccw,cw=self._motors[i]
+      d=max(-100,min(100,int(d)));ccw,cw=self._motors[i]
       if d>0:ccw.duty_u16(self._pct_to_pwm(d));sleep_us(76);cw.duty_u16(65535)
       elif d<0:ccw.duty_u16(65535);sleep_us(76);cw.duty_u16(self._pct_to_pwm(-d))
       else:ccw.duty_u16(0);sleep_us(76);cw.duty_u16(0)
-    return self._speeds.copy()
-
-  def addSpeed(self, duties):
-    for i, d in enumerate(duties):
-      self._speeds[i] = self._clamp(self._speeds[i] + int(d), -100, 100)
-    return self.setSpeed(self._speeds)
-
-  def stop(self):
-    self._speeds = [0, 0, 0]
-    for ccw, cw in self._motors:
-      ccw.duty_u16(0)
-      sleep_us(76)
-      cw.duty_u16(0)
 
   def brake(self):
-    self._speeds = [0, 0, 0]
     for ccw, cw in self._motors:
       ccw.duty_u16(65535)
       sleep_us(76)
       cw.duty_u16(65535)
-
-  # ——————————————————————————————————————————————————————————
-  #                         数据获取
-  # ——————————————————————————————————————————————————————————
-  def getSpeeds(self):
-    return self._speeds.copy()
-
-  def getRawPWM(self):
-    return [(m[0].duty_u16(), m[1].duty_u16()) for m in self._motors]
 
   # ——————————————————————————————————————————————————————————
   #                         工具函数
@@ -78,12 +51,6 @@ class MotionControl:
   @staticmethod
   def _pct_to_pwm(pct):
     return int((100 - max(0, min(100, pct))) * 65535 / 100)
-
-  @staticmethod
-  def _clamp(val, lo, hi):
-    if val < lo:return lo
-    if val > hi:return hi
-    return val
 
   @staticmethod
   def move(speed, angle):

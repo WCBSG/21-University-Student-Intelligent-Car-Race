@@ -75,7 +75,7 @@ def main():
     except Exception as exc:
       errors.append("%s: %s" % (path.relative_to(ROOT), exc))
 
-  key_param = ROOT / "KeyParam.md"
+  key_param = ROOT / "docs" / "KeyParam.md"
   try:
     text = key_param.read_text(encoding="utf-8")
     for required in ("`场心航向 = 0.0°`", "y2 = 78.4", "C ≈ 5475"):

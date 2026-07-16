@@ -5,6 +5,7 @@ config.py — 纯比赛固件用 Config（无 Menu / 无 dict 兼容）
 
 import json
 import os
+from log import info
 
 CONFIG_FILE = "/flash/config.json"
 
@@ -79,8 +80,33 @@ class Config:
     self.next_spin_ms = 1500
     self.home_timeout_ms = 12000
     self.align_tol_deg = 12.0
-    self.calibration_output = False
-    self.log_to_file = False
+    self.debug_output = False
+
+    # ——— TCS 颜色传感器 ———
+    self.tcs_confirm_n = 2          # 黄线确认帧数
+    self.tcs_r_min = 0.28           # 黄线 R 下限
+    self.tcs_g_min = 0.28           # 黄线 G 下限
+    self.tcs_b_max = 0.25           # 黄线 B 上限
+    self.tcs_c_min = 800            # 黄线最低亮度
+
+    # ——— 搜索 / 接近超时 ———
+    self.pick_timeout_ms = 20000    # PICK 搜索超时
+    self.approach_timeout_ms = 15000  # APPROACH 超时
+    self.home_backoff_ms = 1500     # HOME 离线倒车超时
+    self.home_leg2_angle = 45.0     # HOME 二段拐角
+
+    # ——— IMU 融合 ———
+    self.imu_calibrate_samples = 100
+    self.imu_beta = 0.05
+    self.imu_gyro_still = 0.0175
+    self.imu_acc_still = 0.05
+    self.imu_bias_alpha = 0.002
+    self.imu_mag_alpha = 0.002
+    self.imu_mag_dead = 2.2
+    self.imu_mag_pull_max = 6.7
+    self.imu_mag_still_need = 50
+    self.imu_mag_calib_min_samples = 50
+    self.imu_mag_calib_min_span = 80.0
 
   def hdg_off_for(self, cls_id):
     i = int(cls_id)
@@ -153,8 +179,30 @@ class Config:
       "掉头超时": int(self.next_spin_ms),
       "回库超时": int(self.home_timeout_ms),
       "航向容差": float(self.align_tol_deg),
-      "标定输出": bool(self.calibration_output),
-      "日志保存": bool(self.log_to_file),
+      "调试输出": bool(self.debug_output),
+      # TCS
+      "黄线确认帧数": int(self.tcs_confirm_n),
+      "黄线R下限": float(self.tcs_r_min),
+      "黄线G下限": float(self.tcs_g_min),
+      "黄线B上限": float(self.tcs_b_max),
+      "黄线亮度下限": int(self.tcs_c_min),
+      # 超时
+      "搜索超时": int(self.pick_timeout_ms),
+      "接近超时": int(self.approach_timeout_ms),
+      "离线超时": int(self.home_backoff_ms),
+      "回库二段偏角": float(self.home_leg2_angle),
+      # IMU
+      "标定采样数": int(self.imu_calibrate_samples),
+      "滤波增益": float(self.imu_beta),
+      "陀螺静止阈值": float(self.imu_gyro_still),
+      "加计静止阈值": float(self.imu_acc_still),
+      "零偏校正速率": float(self.imu_bias_alpha),
+      "磁融合速率": float(self.imu_mag_alpha),
+      "磁融合死区": float(self.imu_mag_dead),
+      "磁融合上限": float(self.imu_mag_pull_max),
+      "磁融合静止帧数": int(self.imu_mag_still_need),
+      "磁标定最少样本": int(self.imu_mag_calib_min_samples),
+      "磁标定最小跨度": float(self.imu_mag_calib_min_span),
     }
 
   def _apply_dict(self, d):
@@ -164,7 +212,7 @@ class Config:
       try:
         self._set_one(k, v)
       except Exception as e:
-        print("[CONFIG] skip '%s': %s" % (k, e))
+        info("CONFIG", "skip '%s': %s" % (k, e))
 
   def _set_one(self, k, v):
     # 航向 PID
@@ -285,10 +333,31 @@ class Config:
       self.home_timeout_ms = int(v)
     elif k == "航向容差":
       self.align_tol_deg = float(v)
-    elif k == "标定输出":
-      self.calibration_output = bool(v)
-    elif k == "日志保存":
-      self.log_to_file = bool(v)
+    elif k == "调试输出":
+      self.debug_output = bool(v)
+    # TCS
+    elif k == "黄线确认帧数": self.tcs_confirm_n = int(v)
+    elif k == "黄线R下限": self.tcs_r_min = float(v)
+    elif k == "黄线G下限": self.tcs_g_min = float(v)
+    elif k == "黄线B上限": self.tcs_b_max = float(v)
+    elif k == "黄线亮度下限": self.tcs_c_min = int(v)
+    # 超时
+    elif k == "搜索超时": self.pick_timeout_ms = int(v)
+    elif k == "接近超时": self.approach_timeout_ms = int(v)
+    elif k == "离线超时": self.home_backoff_ms = int(v)
+    elif k == "回库二段偏角": self.home_leg2_angle = float(v)
+    # IMU
+    elif k == "标定采样数": self.imu_calibrate_samples = int(v)
+    elif k == "滤波增益": self.imu_beta = float(v)
+    elif k == "陀螺静止阈值": self.imu_gyro_still = float(v)
+    elif k == "加计静止阈值": self.imu_acc_still = float(v)
+    elif k == "零偏校正速率": self.imu_bias_alpha = float(v)
+    elif k == "磁融合速率": self.imu_mag_alpha = float(v)
+    elif k == "磁融合死区": self.imu_mag_dead = float(v)
+    elif k == "磁融合上限": self.imu_mag_pull_max = float(v)
+    elif k == "磁融合静止帧数": self.imu_mag_still_need = int(v)
+    elif k == "磁标定最少样本": self.imu_mag_calib_min_samples = int(v)
+    elif k == "磁标定最小跨度": self.imu_mag_calib_min_span = float(v)
 
   @classmethod
   def load(cls, path=CONFIG_FILE):
@@ -299,7 +368,7 @@ class Config:
         if isinstance(d, dict):
           cfg._apply_dict(d)
         else:
-          print("[CONFIG] invalid JSON, reset to default")
+          info("CONFIG", "invalid JSON, reset to default")
           cfg.save(path)
     except (OSError, ValueError):
       cfg.save(path)
@@ -312,7 +381,7 @@ class Config:
         json.dump(self.to_dict(), f)
       os.rename(tmp, path)
     except (OSError, ValueError) as e:
-      print("[CONFIG] Save failed:", e)
+      info("CONFIG", "Save failed: %s" % e)
 
 
 config = Config()

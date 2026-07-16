@@ -254,12 +254,12 @@ def main():
 
       if time.ticks_diff(now, last_send_ms) >= SEND_MS:
         img = sensor.snapshot()
-        # ROI: 底部 25%（物体在地面，顶部无用），与 openart_mul_od 一致
-        img1 = img.copy(0.75, 1)
+        # ROI: 下方 75%，兼顾远距检测与地面物体
+        roi = img.copy(0.25, 1)
         objects = []
         if net is not None:
           try:
-            for obj in tf.detect(net, img1):
+            for obj in tf.detect(net, roi):
               x1, y1, x2, y2, label, score = obj
               score = float(score)
               if score <= CONF_MIN:

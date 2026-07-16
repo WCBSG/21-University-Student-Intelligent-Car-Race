@@ -17,6 +17,7 @@ from ctrl import HeadingPID
 from config import CLS_LEFT, CLS_RIGHT
 from fsm import IDLE, TRACK, COMPLETE, FAULT
 from fsm import START_TRACK, STOP, ABORT
+from log import info
 
 
 def _wrap(a):
@@ -71,7 +72,7 @@ class MatchRunner:
   def start(self):
     """一键发车：ABORT 清场 → LEAVE。"""
     if self.phase not in ("IDLE", "DONE"):
-      print("[MATCH] cannot start, phase=%s" % self.phase)
+      info("MATCH", "cannot start, phase=%s" % self.phase)
       return False
     self._robot.handle(ABORT)
     self._brake()
@@ -98,12 +99,12 @@ class MatchRunner:
     self._wait_off_line = False
     self.phase = "LEAVE"
     self._arb.acquire(self.OWNER)
-    print("[MATCH] START → LEAVE hold_yaw=%.1f" % self._hold_yaw)
+    info("MATCH", "START → LEAVE hold_yaw=%.1f" % self._hold_yaw)
     return True
 
   def stop(self):
     """紧急停止。"""
-    print("[MATCH] STOP")
+    info("MATCH", "STOP")
     self.phase = "IDLE"
     self._sub = ""
     self._cfg.match_allow = None
@@ -238,7 +239,7 @@ class MatchRunner:
 
   def _fault(self, why):
     """停止比赛但不伪装成 DONE，等待人工急停/重新发车。"""
-    print("[MATCH] FAULT: %s" % why)
+    info("MATCH", "FAULT: %s" % why)
     self.fault_reason = str(why)
     self._robot.handle(ABORT)
     self._brake()
@@ -247,7 +248,7 @@ class MatchRunner:
 
   def _skip_or_home(self, why):
     """当前目标失败：尝试下一类；全部失败时进入 FAULT，禁止提前回库。"""
-    print("[MATCH] %s → skip cls=%s" % (why, self._active_cls))
+    info("MATCH", "%s → skip cls=%s" % (why, self._active_cls))
     if self._active_cls is not None and self._active_cls in self._remaining:
       self._remaining.remove(self._active_cls)
     elif self._remaining:
@@ -314,11 +315,11 @@ class MatchRunner:
     right = c.hdg_off_for(CLS_RIGHT)
     if layout == 2:
       y1 = _wrap(href + left)
-      y2 = _wrap(href + left + 45.0)
+      y2 = _wrap(href + left + float(c.home_leg2_angle))
       return y1, y2
     if layout == 3:
       y1 = _wrap(href + right)
-      y2 = _wrap(href + right - 45.0)
+      y2 = _wrap(href + right - float(c.home_leg2_angle))
       return y1, y2
     if layout == 4:
       return _wrap(href + left), None
@@ -330,12 +331,14 @@ class MatchRunner:
     # FAULT/COMPLETE 等需先回 IDLE，START_TRACK 才生效
     self._robot.handle(ABORT)
     self._brake()
-    self.phase = "PICK"
-    self._phase_ms = ticks_ms()
     # 出库/回场后可能仍压黄线：先等离线再武装场界
     self._arm_boundary_when_clear()
-    self._robot.handle(START_TRACK)
-    print("[MATCH] → PICK cls=%s armed=%s" % (
+    if not self._robot.handle(START_TRACK):
+      self._fault("START_TRACK failed (IMU not ready?)")
+      return
+    self.phase = "PICK"
+    self._phase_ms = ticks_ms()
+    info("MATCH", "→ PICK cls=%s armed=%s" % (
       self._active_cls, self._boundary_armed))
 
   def _arm_boundary_when_clear(self):
@@ -344,12 +347,12 @@ class MatchRunner:
     if self._tcs.on_line:
       self._wait_off_line = True
       self._tcs.reset_crossed()
-      print("[MATCH] boundary wait off-line")
+      info("MATCH", "boundary wait off-line")
     else:
       self._wait_off_line = False
       self._boundary_armed = True
       self._tcs.reset_crossed()
-      print("[MATCH] boundary armed")
+      info("MATCH", "boundary armed")
 
   def _check_search_boundary(self, sensors):
     """
@@ -361,7 +364,7 @@ class MatchRunner:
         self._wait_off_line = False
         self._boundary_armed = True
         self._tcs.reset_crossed()
-        print("[MATCH] boundary armed (cleared line)")
+        info("MATCH", "boundary armed (cleared line)")
       return False
     if not self._boundary_armed:
       return False
@@ -372,7 +375,7 @@ class MatchRunner:
 
   def _enter_recover(self):
     """出界：掉头回场，再搜物体。"""
-    print("[MATCH] OUT OF BOUNDS (yellow) → RECOVER")
+    info("MATCH", "OUT OF BOUNDS (yellow) → RECOVER")
     self._robot.handle(ABORT)
     self._brake()
     self._arb.acquire(self.OWNER)
@@ -395,7 +398,7 @@ class MatchRunner:
     self._tcs.reset_crossed()
     self.phase = "PUSH"
     self._sub = "DRIVE"
-    print("[MATCH] → PUSH")
+    info("MATCH", "→ PUSH")
 
   def _enter_orbit(self, target_yaw):
     previous_phase = self.phase
@@ -412,7 +415,7 @@ class MatchRunner:
     self._bearing_pid.reset()
     self.phase = "ORBIT"
     self._sub = ""
-    print("[MATCH] → ORBIT yaw=%.1f" % target_yaw)
+    info("MATCH", "→ ORBIT yaw=%.1f" % target_yaw)
 
   def _enter_final_approach(self):
     self._phase_ms = ticks_ms()
@@ -421,7 +424,7 @@ class MatchRunner:
     self._bearing_pid.reset()
     self.phase = "FINAL_APPROACH"
     self._sub = ""
-    print("[MATCH] ORBIT → FINAL_APPROACH")
+    info("MATCH", "ORBIT → FINAL_APPROACH")
 
   def _enter_home(self):
     y1, y2 = self._home_plan()
@@ -436,7 +439,7 @@ class MatchRunner:
     else:
       self._sub = "LEG1_TURN"
     self._phase_ms = ticks_ms()
-    print("[MATCH] → HOME sub=%s" % self._sub)
+    info("MATCH", "→ HOME sub=%s" % self._sub)
 
   # ————————————————————————————————————————————————————————
   #                      各 phase
@@ -446,11 +449,11 @@ class MatchRunner:
     """锁发车航向直行，直到稳定见目标 / 超时 → PICK。"""
     now = ticks_ms()
     if self._seen_target(sensors):
-      print("[MATCH] LEAVE → see target")
+      info("MATCH", "LEAVE → see target")
       self._enter_pick()
       return
     if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
-      print("[MATCH] LEAVE timeout → PICK")
+      info("MATCH", "LEAVE timeout → PICK")
       self._enter_pick()
       return
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
@@ -461,14 +464,13 @@ class MatchRunner:
       t = sensors.get("target") if sensors else None
       if t is not None:
         self._active_cls = int(t[0])
-        print("[MATCH] PICK → APPROACH cls=%s" % self._active_cls)
+        info("MATCH", "PICK → APPROACH cls=%s" % self._active_cls)
         self.phase = "APPROACH"
         self._phase_ms = ticks_ms()
     elif st in (IDLE, FAULT):
       # SEARCH/相机失败：跳过当前类，避免永久卡在 PICK
       self._skip_or_home("PICK state=%s" % st)
-    elif ticks_diff(ticks_ms(), self._phase_ms) > 20000:
-      # 20s 仍未找到目标：跳过当前类
+    elif ticks_diff(ticks_ms(), self._phase_ms) > int(self._cfg.pick_timeout_ms):
       self._skip_or_home("PICK timeout")
 
   def _tick_approach(self, sensors):
@@ -484,8 +486,7 @@ class MatchRunner:
           self._enter_orbit(ty)
     elif st in (IDLE, FAULT):
       self._skip_or_home("APPROACH state=%s" % st)
-    elif ticks_diff(ticks_ms(), self._phase_ms) > 15000:
-      # 15s 仍未接近到位：跳过当前类
+    elif ticks_diff(ticks_ms(), self._phase_ms) > int(self._cfg.approach_timeout_ms):
       self._skip_or_home("APPROACH timeout")
 
   def _tick_orbit(self, sensors):
@@ -586,7 +587,7 @@ class MatchRunner:
     elapsed = ticks_diff(now, self._phase_ms)
     if self._sub == "CLEAR":
       if elapsed >= int(self._cfg.push_clear_ms):
-        print("[MATCH] PUSH → SCORE (yellow + clear %dms)" % elapsed)
+        info("MATCH", "PUSH → SCORE (yellow + clear %dms)" % elapsed)
         self._brake()
         self._on_scored()
         return
@@ -602,11 +603,11 @@ class MatchRunner:
       # 车底传感器上线后再前推一小段，确保推杆前方的物体完整离开黄线。
       self._sub = "CLEAR"
       self._phase_ms = now
-      print("[MATCH] PUSH yellow → CLEAR")
+      info("MATCH", "PUSH yellow → CLEAR")
       return
 
     if timed_out:
-      print("[MATCH] PUSH timeout %dms — NOT scored" % elapsed)
+      info("MATCH", "PUSH timeout %dms — NOT scored" % elapsed)
       self._brake()
       self._skip_or_home("PUSH timeout")
       return
@@ -618,7 +619,7 @@ class MatchRunner:
     if self._active_cls is not None and self._active_cls in self._remaining:
       self._remaining.remove(self._active_cls)
     n = int(self._cfg.match_target_count)
-    print("[MATCH] SCORE total=%d/%d rem=%s" % (
+    info("MATCH", "SCORE total=%d/%d rem=%s" % (
       self.scored_count, n, self._remaining))
     if self.scored_count >= n:
       self._enter_home()
@@ -637,7 +638,7 @@ class MatchRunner:
     self._sub = "SPIN"
     self._phase_ms = ticks_ms()
     self._see_streak = 0
-    print("[MATCH] → NEXT SPIN")
+    info("MATCH", "→ NEXT SPIN")
 
   def _tick_next(self, sensors):
     now = ticks_ms()
@@ -651,15 +652,15 @@ class MatchRunner:
         self._sub = "DRIVE"
         self._phase_ms = now
         self._see_streak = 0
-        print("[MATCH] NEXT → DRIVE")
+        info("MATCH", "NEXT → DRIVE")
       return
     # DRIVE
     if self._seen_target(sensors):
-      print("[MATCH] NEXT see target → PICK")
+      info("MATCH", "NEXT see target → PICK")
       self._enter_pick()
       return
     if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
-      print("[MATCH] NEXT drive timeout → PICK")
+      info("MATCH", "NEXT drive timeout → PICK")
       self._enter_pick()
       return
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
@@ -676,14 +677,14 @@ class MatchRunner:
         self._sub = "DRIVE"
         self._phase_ms = now
         self._see_streak = 0
-        print("[MATCH] RECOVER → DRIVE")
+        info("MATCH", "RECOVER → DRIVE")
       return
     if self._seen_target(sensors):
-      print("[MATCH] RECOVER see target → PICK")
+      info("MATCH", "RECOVER see target → PICK")
       self._enter_pick()
       return
     if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
-      print("[MATCH] RECOVER timeout → PICK")
+      info("MATCH", "RECOVER timeout → PICK")
       self._enter_pick()
       return
     # 回场途中可能压黄线：只等离线武装，不在此判出界
@@ -691,7 +692,7 @@ class MatchRunner:
       self._wait_off_line = False
       self._boundary_armed = True
       self._tcs.reset_crossed()
-      print("[MATCH] boundary armed (recover)")
+      info("MATCH", "boundary armed (recover)")
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
 
   def _tick_home(self, sensors):
@@ -707,7 +708,7 @@ class MatchRunner:
       if not on_line:
         self._sub = "LEG1_TURN"
         self._phase_ms = now
-        print("[MATCH] HOME → LEG1_TURN")
+        info("MATCH", "HOME → LEG1_TURN")
         return
       self._write_move(-float(self._cfg.drive_duty), 0.0)
       return
@@ -719,7 +720,7 @@ class MatchRunner:
         self._sub = "LEG1_DRIVE"
         self._phase_ms = now
         self._tcs.reset_crossed()
-        print("[MATCH] HOME → LEG1_DRIVE")
+        info("MATCH", "HOME → LEG1_DRIVE")
       return
 
     if self._sub == "LEG1_DRIVE":
@@ -732,17 +733,17 @@ class MatchRunner:
         self._hold_brake()
         self._sub = "BACKOFF"
         self._phase_ms = now
-        print("[MATCH] HOME → BACKOFF")
+        info("MATCH", "HOME → BACKOFF")
         return
       self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
       return
 
     if self._sub == "BACKOFF":
-      if not on_line or ticks_diff(now, self._phase_ms) > 1500:
+      if not on_line or ticks_diff(now, self._phase_ms) > int(self._cfg.home_backoff_ms):
         self._yaw_target = self._home_y2
         self._sub = "LEG2_TURN"
         self._phase_ms = now
-        print("[MATCH] HOME → LEG2_TURN")
+        info("MATCH", "HOME → LEG2_TURN")
         return
       self._write_move(-float(self._cfg.drive_duty), 0.0)
       return
@@ -754,7 +755,7 @@ class MatchRunner:
         self._sub = "LEG2_DRIVE"
         self._phase_ms = now
         self._tcs.reset_crossed()
-        print("[MATCH] HOME → LEG2_DRIVE")
+        info("MATCH", "HOME → LEG2_DRIVE")
       return
 
     if self._sub == "LEG2_DRIVE":
@@ -768,7 +769,7 @@ class MatchRunner:
     self._robot.handle(STOP)
     self.phase = "DONE"
     self._sub = ""
-    print("[MATCH] DONE scored=%d" % self.scored_count)
+    info("MATCH", "DONE scored=%d" % self.scored_count)
 
   # ————————————————————————————————————————————————————————
   #                      状态查询

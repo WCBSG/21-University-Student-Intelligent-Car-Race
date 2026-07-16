@@ -4,6 +4,8 @@ app/fsm.py — Robot FSM + Intent + Mode 基础（三合一，纯比赛固件）
 状态: IDLE | SEARCH | TRACK | COMPLETE | FAULT
 """
 
+from log import info
+
 # =============================================================================
 #                          Intent（字符串常量 + 队列）
 # =============================================================================
@@ -138,7 +140,7 @@ class RobotFSM:
     if old is not None:
       old.exit()
       self._arb.release(old.id)
-    print("[FSM] %s → %s" % (self.state, new_state))
+    info("FSM", "%s → %s" % (self.state, new_state))
     self.state = new_state
     self._mode = self._modes.get(new_state)
     if self._mode is None:
