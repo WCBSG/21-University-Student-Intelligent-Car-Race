@@ -76,8 +76,15 @@ class Config:
     self.approach_cluster_timeout_ms = 15000
     self.drive_timeout_ms = 5000
     self.push_timeout_ms = 3000
-    self.push_clear_ms = 200
-    self.next_spin_ms = 1500
+    self.push_clear_ms = 200  # 已废弃：黄线直接 BACKOFF，保留键兼容旧 config.json
+    # PUSH 视觉防推空：连续 N 帧丢失→找物；过偏→慢纠；左侧容差更宽（副车兜底）
+    self.push_watch_frames = 2
+    self.push_cx_left_min = 8.0    # cx 下限（偏左更宽容）
+    self.push_cx_right_max = 78.0  # cx 上限（偏右更严）
+    self.push_correct_duty = 10.0  # 过偏慢纠前向占空比
+    self.push_lost_blind_ms = 600  # 推进超过此时长后忽略丢失（贴车头遮挡）
+    self.next_spin_ms = 1500       # 原子 BACKOFF 转 180° 超时
+    self.recover_backoff_ms = 500  # 原子 BACKOFF 后退离线超时
     self.home_timeout_ms = 12000
     self.align_tol_deg = 12.0
     self.debug_output = False
@@ -93,7 +100,6 @@ class Config:
     self.pick_timeout_ms = 20000    # PICK 搜索超时
     self.approach_timeout_ms = 15000  # APPROACH 超时
     self.home_backoff_ms = 1500     # HOME 离线倒车超时
-    self.home_leg2_angle = 45.0     # HOME 二段拐角
 
     # ——— IMU 融合 ———
     self.imu_calibrate_samples = 100
@@ -104,9 +110,15 @@ class Config:
     self.imu_mag_alpha = 0.002
     self.imu_mag_dead = 2.2
     self.imu_mag_pull_max = 6.7
-    self.imu_mag_still_need = 50
+    self.imu_mag_still_need = 100
+    self.imu_still_needed = 100
+    self.imu_mag_lpf_alpha = 0.01
     self.imu_mag_calib_min_samples = 50
     self.imu_mag_calib_min_span = 80.0
+    # 关磁靠墙: 少28°→1.084; +6°→1.103; CCW少10°→1.135
+    self.imu_gyro_scale = 1.135
+    self.imu_spin_beta = 0.01
+    self.imu_spin_dps = 40.0
 
   def hdg_off_for(self, cls_id):
     i = int(cls_id)
@@ -176,7 +188,13 @@ class Config:
       "行驶超时": int(self.drive_timeout_ms),
       "推箱超时": int(self.push_timeout_ms),
       "清线时间": int(self.push_clear_ms),
+      "推箱监护帧数": int(self.push_watch_frames),
+      "推箱左容差": float(self.push_cx_left_min),
+      "推箱右容差": float(self.push_cx_right_max),
+      "推箱纠偏占空比": float(self.push_correct_duty),
+      "推箱丢失盲区": int(self.push_lost_blind_ms),
       "掉头超时": int(self.next_spin_ms),
+      "后退超时": int(self.recover_backoff_ms),
       "回库超时": int(self.home_timeout_ms),
       "航向容差": float(self.align_tol_deg),
       "调试输出": bool(self.debug_output),
@@ -190,7 +208,6 @@ class Config:
       "搜索超时": int(self.pick_timeout_ms),
       "接近超时": int(self.approach_timeout_ms),
       "离线超时": int(self.home_backoff_ms),
-      "回库二段偏角": float(self.home_leg2_angle),
       # IMU
       "标定采样数": int(self.imu_calibrate_samples),
       "滤波增益": float(self.imu_beta),
@@ -201,8 +218,13 @@ class Config:
       "磁融合死区": float(self.imu_mag_dead),
       "磁融合上限": float(self.imu_mag_pull_max),
       "磁融合静止帧数": int(self.imu_mag_still_need),
+      "零偏静止帧数": int(self.imu_still_needed),
+      "磁参考LPFa": float(self.imu_mag_lpf_alpha),
       "磁标定最少样本": int(self.imu_mag_calib_min_samples),
       "磁标定最小跨度": float(self.imu_mag_calib_min_span),
+      "陀螺刻度": float(self.imu_gyro_scale),
+      "转动滤波增益": float(self.imu_spin_beta),
+      "转动角速度阈": float(self.imu_spin_dps),
     }
 
   def _apply_dict(self, d):
@@ -327,8 +349,20 @@ class Config:
       self.push_timeout_ms = int(v)
     elif k == "清线时间":
       self.push_clear_ms = int(v)
+    elif k == "推箱监护帧数":
+      self.push_watch_frames = int(v)
+    elif k == "推箱左容差":
+      self.push_cx_left_min = float(v)
+    elif k == "推箱右容差":
+      self.push_cx_right_max = float(v)
+    elif k == "推箱纠偏占空比":
+      self.push_correct_duty = float(v)
+    elif k == "推箱丢失盲区":
+      self.push_lost_blind_ms = int(v)
     elif k == "掉头超时":
       self.next_spin_ms = int(v)
+    elif k == "后退超时":
+      self.recover_backoff_ms = int(v)
     elif k == "回库超时":
       self.home_timeout_ms = int(v)
     elif k == "航向容差":
@@ -345,7 +379,6 @@ class Config:
     elif k == "搜索超时": self.pick_timeout_ms = int(v)
     elif k == "接近超时": self.approach_timeout_ms = int(v)
     elif k == "离线超时": self.home_backoff_ms = int(v)
-    elif k == "回库二段偏角": self.home_leg2_angle = float(v)
     # IMU
     elif k == "标定采样数": self.imu_calibrate_samples = int(v)
     elif k == "滤波增益": self.imu_beta = float(v)
@@ -356,8 +389,13 @@ class Config:
     elif k == "磁融合死区": self.imu_mag_dead = float(v)
     elif k == "磁融合上限": self.imu_mag_pull_max = float(v)
     elif k == "磁融合静止帧数": self.imu_mag_still_need = int(v)
+    elif k == "零偏静止帧数": self.imu_still_needed = int(v)
+    elif k == "磁参考LPFa": self.imu_mag_lpf_alpha = float(v)
     elif k == "磁标定最少样本": self.imu_mag_calib_min_samples = int(v)
     elif k == "磁标定最小跨度": self.imu_mag_calib_min_span = float(v)
+    elif k == "陀螺刻度": self.imu_gyro_scale = float(v)
+    elif k == "转动滤波增益": self.imu_spin_beta = float(v)
+    elif k == "转动角速度阈": self.imu_spin_dps = float(v)
 
   @classmethod
   def load(cls, path=CONFIG_FILE):

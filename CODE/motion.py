@@ -41,18 +41,30 @@ class MotionControl:
     """
     设置三路电机占空比 [-100, 100]。
     正值=逆时针, 负值=顺时针, 0=停。
-    ! 传入数组不应大于电机数,这里不作校验
+    先写三路第一脚，统一 dead-time 后再写第二脚（DRV8870 需要 ≥76us）。
     """
+    second = []
     for i, d in enumerate(duties):
-      d=max(-100,min(100,int(d)));ccw,cw=self._motors[i]
-      if d>0:ccw.duty_u16(self._pct_to_pwm(d));sleep_us(76);cw.duty_u16(65535)
-      elif d<0:ccw.duty_u16(65535);sleep_us(76);cw.duty_u16(self._pct_to_pwm(-d))
-      else:ccw.duty_u16(0);sleep_us(76);cw.duty_u16(0)
+      d = max(-100, min(100, int(d)))
+      ccw, cw = self._motors[i]
+      if d > 0:
+        ccw.duty_u16(self._pct_to_pwm(d))
+        second.append((cw, 65535))
+      elif d < 0:
+        ccw.duty_u16(65535)
+        second.append((cw, self._pct_to_pwm(-d)))
+      else:
+        ccw.duty_u16(0)
+        second.append((cw, 0))
+    sleep_us(76)
+    for pin, val in second:
+      pin.duty_u16(val)
 
   def brake(self):
     for ccw, cw in self._motors:
       ccw.duty_u16(65535)
-      sleep_us(76)
+    sleep_us(76)
+    for ccw, cw in self._motors:
       cw.duty_u16(65535)
 
   # ——————————————————————————————————————————————————————————

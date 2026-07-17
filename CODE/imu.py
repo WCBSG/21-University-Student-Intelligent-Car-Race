@@ -1,9 +1,10 @@
 """
 imu.py — IMU963 + Madgwick 姿态融合（比赛固件）
 
-融合: Madgwick 6 轴 AHRS（加速度钉 Roll/Pitch，Yaw 靠陀螺+零偏）
-可选静止磁慢纠（相对标定零点，非磁北）。
-ticker @100Hz: imu.update()
+融合:
+  - 主航向 = Madgwick 6 轴 AHRS（加速度钉 Roll/Pitch，Yaw 靠三轴陀螺）
+  - 可选：静止时相对磁力计慢纠 fused_offset（非磁北，只纠漂移）
+ticker @200Hz: imu.update()
 """
 
 import math
@@ -109,6 +110,12 @@ class MadgwickAHRS:
       self.q2 /= q_norm
       self.q3 /= q_norm
 
+  def yaw_deg(self):
+    """当前四元数偏航角 deg [-180, 180]。"""
+    yaw = math.atan2(2.0 * (self.q0 * self.q3 + self.q1 * self.q2),
+                     1.0 - 2.0 * (self.q2 * self.q2 + self.q3 * self.q3))
+    return yaw * RAD_TO_DEG
+
   def reset(self):
     self.q0 = 1.0
     self.q1 = 0.0
@@ -121,7 +128,10 @@ class MadgwickAHRS:
 # =============================================================================
 
 class ImuSensor:
-  """IMU963 + Madgwick；可选磁相对慢纠。"""
+  """
+  IMU963 + Madgwick 主航向；可选静止磁相对慢纠。
+  输出 yaw = Madgwick_yaw + fused_offset（开磁时）；关磁则 fused_offset≡0。
+  """
 
   def __init__(self, calibrate_samples=100, beta=0.05, model="963"):
     self.model = "963"
@@ -133,7 +143,7 @@ class ImuSensor:
 
     self.data = self.raw.get()
 
-    self._filter = MadgwickAHRS(beta=beta, sample_freq=100.0)
+    self._filter = MadgwickAHRS(beta=beta, sample_freq=200.0)
 
     self._bias = [0.0, 0.0, 0.0]
 
@@ -144,12 +154,13 @@ class ImuSensor:
     self._calib_gz = 0.0
     self._calibrated = False
 
-    self._snap = [0.0] * 10  # 2×(q0,q1,q2,q3,gyro_yaw)
+    # snap: 2×(q0,q1,q2,q3) 双缓冲防 torn read
+    self._snap = [0.0] * 8
     self._snap_idx = 0
 
     self._bias_alpha = 0.002
     self._still_count = 0
-    self._still_needed = 50
+    self._still_needed = 100
     self._gyro_still = 0.0175
     self._acc_still = 0.05
 
@@ -157,18 +168,21 @@ class ImuSensor:
     self._mag_alpha = 0.002
     self._mag_dead = 2.2
     self._mag_pull_max = 6.7
-    self._mag_still_need = 50
+    self._mag_still_need = 100
+    self._mag_lpf_alpha = 0.01
     self._mag_off = [0.0, 0.0, 0.0]
     self._mx = 0.0; self._my = 0.0; self._mz = 0.0
-    self._gyro_yaw = 0.0
-    self._fused_offset = 0.0
+    self._fused_offset = 0.0      # 磁慢纠偏置，加在 Madgwick yaw 上
     self._mag_ref = None
     self._mag_rel_lpf = None
     self._gyro_dps = 0.0
     self._motor_on = False
+    self._gyro_scale = 1.0         # 角速度比例标定（963 实车约 1.08）
+    self._spin_beta = 0.01         # 高速转动时 Madgwick beta 上限（抑加计干扰）
+    self._spin_dps = 40.0          # 超过此角速度启用 spin_beta
 
   def update(self):
-    """ticker 回调：标定 / 去偏 / Madgwick / 快照。"""
+    """ticker 回调：标定 / 去偏 / Madgwick / 磁慢纠 / 快照。"""
     d = self.data
     ax_raw, ay_raw, az_raw = d[0], d[1], d[2]
     gx_raw, gy_raw, gz_raw = d[3], d[4], d[5]
@@ -197,7 +211,6 @@ class ImuSensor:
                       self._calib_gz / n]
         self._calibrated = True
         self._filter.reset()
-        self._gyro_yaw = 0.0
         self._fused_offset = 0.0
         self._mag_ref = None
         self._mag_rel_lpf = None
@@ -222,22 +235,35 @@ class ImuSensor:
     else:
       self._still_count = 0
 
-    self._filter.update(gx, gy, gz, ax, ay, az)
+    # 实车角速度刻度（963 相对旧 660 实车偏慢，需标定）
+    s = self._gyro_scale
+    gx_f = gx * s
+    gy_f = gy * s
+    gz_f = gz * s
+
+    # 转动中降低 beta：加计受向心加速度污染时少拉姿态，保护 yaw
+    # 转动中降 beta 抑向心加速度；滞回退出防余振反复切换
+    beta_saved = self._filter.beta
+    if self._gyro_dps >= self._spin_dps:
+      if self._spin_beta < beta_saved:
+        self._filter.beta = self._spin_beta
+    elif self._gyro_dps < self._spin_dps * 0.5:
+      self._filter.beta = beta_saved
+    self._filter.update(gx_f, gy_f, gz_f, ax, ay, az)
 
     self._mx = _mx - self._mag_off[0]
     self._my = _my - self._mag_off[1]
     self._mz = _mz - self._mag_off[2]
 
-    self._gyro_yaw += gz * self._filter.dt * RAD_TO_DEG
-    self._gyro_yaw = self._normalize_angle(self._gyro_yaw)
-
+    # 静止磁慢纠：相对 Mag 拉 Madgwick+offset，不改四元数本身
     if self._mag_enabled:
       if (self._still_count >= self._mag_still_need
           and not self._motor_on and self._gyro_dps < 0.5):
         mag = self._mag_heading_from_q(
           self._filter.q0, self._filter.q1, self._filter.q2, self._filter.q3)
         if mag is not None:
-          prev = self._normalize_angle(self._gyro_yaw + self._fused_offset)
+          mad = self._filter.yaw_deg()
+          prev = self._normalize_angle(mad + self._fused_offset)
           if self._mag_ref is None:
             self._mag_ref = self._normalize_angle(mag - prev)
             self._mag_rel_lpf = 0.0
@@ -246,46 +272,53 @@ class ImuSensor:
             self._mag_rel_lpf = mag_rel
           else:
             self._mag_rel_lpf = self._normalize_angle(
-              self._mag_rel_lpf + 0.04 * self._normalize_angle(
+              self._mag_rel_lpf + self._mag_lpf_alpha * self._normalize_angle(
                 mag_rel - self._mag_rel_lpf))
           diff = self._normalize_angle(self._mag_rel_lpf - prev)
           ad = abs(diff)
-          if self._mag_dead <= ad <= self._mag_pull_max:
+          if ad >= self._mag_dead:
+            if ad > self._mag_pull_max:
+              diff = self._mag_pull_max if diff > 0 else -self._mag_pull_max
             self._fused_offset += self._mag_alpha * diff
 
     f = self._filter
-    off = self._snap_idx * 5
+    off = self._snap_idx * 4
     self._snap[off]     = f.q0
     self._snap[off + 1] = f.q1
     self._snap[off + 2] = f.q2
     self._snap[off + 3] = f.q3
-    self._snap[off + 4] = self._gyro_yaw
     self._snap_idx ^= 1
 
   def _read_snap(self):
-    off = (1 - self._snap_idx) * 5
-    return tuple(self._snap[off + i] for i in range(5))
+    off = (1 - self._snap_idx) * 4
+    return tuple(self._snap[off + i] for i in range(4))
+
+  @staticmethod
+  def _yaw_from_quat(q0, q1, q2, q3):
+    yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
+                     1.0 - 2.0 * (q2 * q2 + q3 * q3))
+    return yaw * RAD_TO_DEG
+
+  def get_madgwick_yaw(self):
+    """纯 Madgwick 航向（无磁偏置）。"""
+    if not self._calibrated:
+      return 0.0
+    q0, q1, q2, q3 = self._read_snap()
+    return self._yaw_from_quat(q0, q1, q2, q3)
 
   def get_yaw(self, motor_on=False):
+    """控制用航向：Madgwick +（开磁时）静止慢纠偏置。"""
     if not self._calibrated:
       return 0.0
     if self._mag_enabled:
       yaw, _ = self.get_fused_yaw(motor_on=motor_on, apply=False)
       return yaw
-    q0, q1, q2, q3, _ = self._read_snap()
-    yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
-                     1.0 - 2.0 * (q2 * q2 + q3 * q3))
-    return yaw * RAD_TO_DEG
-
-  def get_gyro_yaw(self):
-    if not self._calibrated:
-      return 0.0
-    return self._snap[(1 - self._snap_idx) * 5 + 4]
+    return self.get_madgwick_yaw()
 
   def get_mag_heading(self):
     if not self._mag_enabled or not self._calibrated:
       return None
-    q0, q1, q2, q3, _ = self._read_snap()
+    q0, q1, q2, q3 = self._read_snap()
     return self._mag_heading_from_q(q0, q1, q2, q3)
 
   def _mag_heading_from_q(self, q0, q1, q2, q3):
@@ -311,26 +344,33 @@ class ImuSensor:
     return self._normalize_angle(mag - self._mag_ref)
 
   def get_fused_yaw(self, motor_on=False, alpha=None, apply=False):
-    gyro = self.get_gyro_yaw()
-    fused = self._normalize_angle(gyro + self._fused_offset)
+    """
+    Madgwick + fused_offset。
+    运动/未纠: src=mad；静止磁有效纠偏中: src=fused。
+    """
+    base = self.get_madgwick_yaw()
+    fused = self._normalize_angle(base + self._fused_offset)
     if not self._mag_enabled:
-      return fused, "gyro"
+      return fused, "mad"
     if motor_on or self._motor_on or self._gyro_dps >= 0.5:
-      return fused, "gyro"
+      return fused, "mad"
     mag_rel = self.get_mag_rel()
     if mag_rel is None:
-      return fused, "gyro"
+      return fused, "mad"
     diff = self._normalize_angle(mag_rel - fused)
     ad = abs(diff)
-    if ad < self._mag_dead or ad > self._mag_pull_max:
-      return fused, "gyro"
+    if ad < self._mag_dead:
+      return fused, "mad"
     if self._still_count < self._mag_still_need:
-      return fused, "gyro"
+      return fused, "mad"
     if apply:
       a = self._mag_alpha if alpha is None else alpha
       if a > 0.0:
-        self._fused_offset += a * diff
-        fused = self._normalize_angle(gyro + self._fused_offset)
+        corr = diff
+        if ad > self._mag_pull_max:
+          corr = self._mag_pull_max if diff > 0 else -self._mag_pull_max
+        self._fused_offset += a * corr
+        fused = self._normalize_angle(base + self._fused_offset)
     return fused, "fused"
 
   @property
@@ -361,7 +401,9 @@ class ImuSensor:
 
   def set_fusion_params(self, gyro_still=0.0175, acc_still=0.05,
                          bias_alpha=0.002, mag_alpha=0.002,
-                         mag_dead=2.2, mag_pull_max=6.7, mag_still_need=50):
+                         mag_dead=2.2, mag_pull_max=6.7, mag_still_need=100,
+                         still_needed=100, mag_lpf_alpha=0.01,
+                         gyro_scale=1.0, spin_beta=0.01, spin_dps=40.0):
     self._gyro_still = float(gyro_still)
     self._acc_still = float(acc_still)
     self._bias_alpha = float(bias_alpha)
@@ -369,6 +411,11 @@ class ImuSensor:
     self._mag_dead = float(mag_dead)
     self._mag_pull_max = float(mag_pull_max)
     self._mag_still_need = int(mag_still_need)
+    self._still_needed = int(still_needed)
+    self._mag_lpf_alpha = float(mag_lpf_alpha)
+    self._gyro_scale = float(gyro_scale)
+    self._spin_beta = float(spin_beta)
+    self._spin_dps = float(spin_dps)
 
   @staticmethod
   def _normalize_angle(a):

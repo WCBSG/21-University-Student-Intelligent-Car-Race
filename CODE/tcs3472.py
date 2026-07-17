@@ -198,7 +198,8 @@ class TCS3472:
 
   def crossed_yellow(self):
     """
-    黄线 OFF→ON 上升沿（滞回）。I2C 失败本拍视为非黄，不崩主循环。
+    更新黄线滞回状态机，返回 OFF→ON 上升沿。
+    比赛业务请用 on_line 电平（confirm_n 帧），上升沿易漏。
     """
     try:
       raw = self.is_yellow()
