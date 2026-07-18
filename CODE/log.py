@@ -1,7 +1,6 @@
 """
-log.py — 统一日志接口（仅写文件，不打串口）
-  info(tag, msg)   → [t+sss.ss] [TAG] msg → /flash/log.txt
-  setup(enabled)   → 开关文件写入
+log.py — 统一日志接口（仅写文件）
+  info(tag, msg) → [t+sss.ss] [TAG] msg → /flash/log.txt
 """
 import os
 from time import ticks_ms
@@ -21,7 +20,6 @@ def _flush():
   except Exception:
     pass
   _buf = ''
-  # 超限滚动：重命名旧文件，新建日志
   try:
     st = os.stat(_path)
     if st[6] > MAX_KB * 1024:
@@ -44,4 +42,3 @@ def info(tag, msg):
   """带标签日志: [t+sss.ss] [TAG] msg → 文件"""
   line = "[%6.2f] [%s] %s" % (ticks_ms() / 1000, tag, msg)
   _write(line + '\n')
-

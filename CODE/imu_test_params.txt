@@ -1,0 +1,17 @@
+gyro_scale=1.0
+beta=0.05
+spin_beta=0.01
+spin_dps=40.0
+gyro_still=0.0175
+acc_still=0.05
+bias_alpha=0.002
+still_need=100
+mag_on=True
+mag_ox=1733.0
+mag_oy=-437.5
+mag_oz=0.0
+mag_alpha=0.002
+mag_dead=2.2
+mag_pull=6.7
+mag_still_n=100
+mag_lpf=0.01

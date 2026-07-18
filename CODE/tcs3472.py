@@ -113,8 +113,6 @@ class TCS3472:
     self._addr = addr
     self._gain = gain
     self._atime = atime
-    self._prev_yellow = False
-    self._yellow_count = 0
     self._inited = False
     self.confirm_n = 2
     self._on_line = False
@@ -177,12 +175,6 @@ class TCS3472:
       self._on_i2c_error()
       return self._last_rgb
 
-  def read_rgb(self):
-    r, g, b, c = self.read_raw()
-    if c < 10:
-      return (0.0, 0.0, 0.0)
-    return (r / c, g / c, b / c)
-
   def is_yellow(self):
     r, g, b, c = self.read_raw()
     # 旧读数只供诊断显示；绝不能在通信失败时继续生成黄线事件。
@@ -214,13 +206,11 @@ class TCS3472:
       if (not self._on_line) and self._y_streak >= self.confirm_n:
         self._on_line = True
         rising = True
-        self._yellow_count += 1
     else:
       self._y_streak = 0
       self._n_streak += 1
       if self._on_line and self._n_streak >= self.confirm_n:
         self._on_line = False
-    self._prev_yellow = raw
     return rising
 
   def reset_crossed(self):
@@ -230,10 +220,6 @@ class TCS3472:
   @property
   def on_line(self):
     return self._on_line
-
-  @property
-  def yellow_cross_count(self):
-    return self._yellow_count
 
   def last_rgb(self):
     """返回上次 ISR 读到的 (R,G,B,C,rn,gn,bn,ok)，不再读 I2C。"""

@@ -1,6 +1,6 @@
 """
-config.py — 纯比赛固件用 Config（无 Menu / 无 dict 兼容）
-启动 Config.load() 从 /flash/config.json 加载；字段均中文 key。
+config.py — 纯比赛固件 Config
+启动 load_config() 从 /flash/config.json 加载；字段均中文 key。
 """
 
 import json
@@ -33,8 +33,108 @@ class TrackingParams:
     self.stage_bottom_pct = 75.0
     self.contact_bottom_pct = 94.0
     self.bearing_actuation_sign = 1.0
-    self.reverse_angle = 30.0
     self.cam_timeout_ms = 5000
+
+
+def _ints(v):
+  return [int(x) for x in v]
+
+
+def _floats(v):
+  return [float(x) for x in v]
+
+
+def _match_mode(v):
+  s = str(v).strip().lower()
+  return "pre" if s in ("pre", "预赛") else "final"
+
+
+# (中文key, 属性路径, 转换)  path=None 表示 Config 自身属性；tuple 表示嵌套
+_KEY_MAP = (
+  ("航向P", ("heading", "kp"), float),
+  ("航向上限", ("heading", "max_out"), float),
+  ("航向死区", ("heading", "deadband"), float),
+  ("跟踪P", ("tracking_bearing", "kp"), float),
+  ("跟踪上限", ("tracking_bearing", "max_out"), float),
+  ("跟踪死区", ("tracking_bearing", "deadband"), float),
+  ("接近速度", ("tracking", "approach_speed"), float),
+  ("最终接近速度", ("tracking", "final_approach_speed"), float),
+  ("搜索速度", ("tracking", "search_speed"), float),
+  ("目标类别", ("tracking", "target_class"), int),
+  ("最低置信度", ("tracking", "min_confidence"), int),
+  ("确认帧数", ("tracking", "confirm_frames"), int),
+  ("丢失帧数", ("tracking", "lost_frames"), int),
+  ("停止位置", ("tracking", "stop_bottom_pct"), float),
+  ("绕行起始位置", ("tracking", "stage_bottom_pct"), float),
+  ("接触位置", ("tracking", "contact_bottom_pct"), float),
+  ("视觉执行极性", ("tracking", "bearing_actuation_sign"), float),
+  ("相机超时", ("tracking", "cam_timeout_ms"), int),
+  ("磁力计开关", "mag_enabled", bool),
+  ("磁力计X偏移", "mag_ox", float),
+  ("磁力计Y偏移", "mag_oy", float),
+  ("磁力计Z偏移", "mag_oz", float),
+  ("目标个数", "match_target_count", int),
+  ("发车位置", "start_layout", int),
+  ("比赛模式", "match_mode", _match_mode),
+  ("场心航向", "push_hdg_ref", float),
+  ("推箱偏角", "hdg_off", _floats),
+  ("搜索顺序", "match_order", _ints),
+  ("严格目标", "strict_target", bool),
+  ("单车目标类别", "single_target_class", int),
+  ("行驶占空比", "drive_duty", float),
+  ("推箱占空比", "push_duty", float),
+  ("航向执行极性", "yaw_actuation_sign", float),
+  ("绕行速度", "orbit_speed", float),
+  ("绕行距离P", "orbit_radial_kp", float),
+  ("绕行距离上限", "orbit_radial_max", float),
+  ("绕行超时", "orbit_timeout_ms", int),
+  ("绕行航向容差", "orbit_yaw_tol_deg", float),
+  ("绕行居中容差", "orbit_center_tol_pct", float),
+  ("绕行确认帧数", "orbit_confirm_frames", int),
+  ("绕行丢失帧数", "orbit_lost_frames", int),
+  ("绕轴自旋", "orbit_front_spin", float),
+  ("绕轴侧移", "orbit_front_slip", float),
+  ("绕轴翻转", "orbit_front_flip", bool),
+  ("绕物总超时", "approach_cluster_timeout_ms", int),
+  ("行驶超时", "drive_timeout_ms", int),
+  ("推箱超时", "push_timeout_ms", int),
+  ("推箱监护帧数", "push_watch_frames", int),
+  ("推箱左容差", "push_cx_left_min", float),
+  ("推箱右容差", "push_cx_right_max", float),
+  ("推箱纠偏占空比", "push_correct_duty", float),
+  ("推箱丢失盲区", "push_lost_blind_ms", int),
+  ("后退最少", "backoff_retreat_min_ms", int),
+  ("自旋角度", "backoff_spin_deg", float),
+  ("后退超时", "recover_backoff_ms", int),
+  ("回库超时", "home_timeout_ms", int),
+  ("航向容差", "align_tol_deg", float),
+  ("调试输出", "debug_output", bool),
+  ("黄线确认帧数", "tcs_confirm_n", int),
+  ("黄线R下限", "tcs_r_min", float),
+  ("黄线G下限", "tcs_g_min", float),
+  ("黄线B上限", "tcs_b_max", float),
+  ("黄线亮度下限", "tcs_c_min", int),
+  ("搜索超时", "pick_timeout_ms", int),
+  ("队首换类帧数", "pick_class_frames", int),
+  ("回中前进超时", "center_fwd_ms", int),
+  ("离线超时", "home_backoff_ms", int),
+  ("标定采样数", "imu_calibrate_samples", int),
+  ("滤波增益", "imu_beta", float),
+  ("陀螺静止阈值", "imu_gyro_still", float),
+  ("加计静止阈值", "imu_acc_still", float),
+  ("零偏校正速率", "imu_bias_alpha", float),
+  ("磁融合速率", "imu_mag_alpha", float),
+  ("磁融合死区", "imu_mag_dead", float),
+  ("磁融合上限", "imu_mag_pull_max", float),
+  ("磁融合静止帧数", "imu_mag_still_need", int),
+  ("零偏静止帧数", "imu_still_needed", int),
+  ("磁参考LPFa", "imu_mag_lpf_alpha", float),
+  ("陀螺刻度", "imu_gyro_scale", float),
+  ("转动滤波增益", "imu_spin_beta", float),
+  ("转动角速度阈", "imu_spin_dps", float),
+)
+
+_KEY_LOOKUP = {k: (path, fn) for k, path, fn in _KEY_MAP}
 
 
 class Config:
@@ -42,71 +142,55 @@ class Config:
     self.heading = PidGains(kp=2.0, max_out=50.0, deadband=1.0)
     self.tracking_bearing = PidGains(kp=1.5, max_out=60.0, deadband=0.02)
     self.tracking = TrackingParams()
-    # 磁力计
     self.mag_enabled = False
     self.mag_ox = 0.0
     self.mag_oy = 0.0
     self.mag_oz = 0.0
-    # 比赛
     self.match_target_count = 3
-    self.match_mode = "final"        # "pre"=预赛直推; "final"=决赛绕行
-    self.start_layout = 0           # 0=底边中; 1=底边中; 2=左下; 3=右下; 4=左边中
-    self.push_hdg_ref = 0.0         # 朝场心 H_ref
-    self.hdg_off = [0.0, -90.0, 180.0]  # 按 cls_id: 沙袋/网球/熊（相对场心）
-    self.match_order = [CLS_UP, CLS_LEFT, CLS_RIGHT]  # HUNT 优先序
+    self.match_mode = "final"
+    self.start_layout = 0
+    self.push_hdg_ref = 0.0
+    self.hdg_off = [0.0, -90.0, 180.0]
+    self.match_order = [CLS_UP, CLS_LEFT, CLS_RIGHT]
     self.strict_target = False
     self.single_target_class = CLS_UP
     self.drive_duty = 15.0
     self.push_duty = 12.0
-    # 实车标定: 三轮同正值使 yaw 减小，所以绝对航向执行极性为 -1。
     self.yaw_actuation_sign = -1.0
     self.orbit_speed = 12.0
-    self.orbit_direction_sign = -1.0
     self.orbit_radial_kp = 0.6
     self.orbit_radial_max = 10.0
     self.orbit_timeout_ms = 8000
     self.orbit_yaw_tol_deg = 8.0
     self.orbit_center_tol_pct = 8.0
-    self.orbit_range_tol_pct = 7.0
     self.orbit_confirm_frames = 4
     self.orbit_lost_frames = 6
-    # FACE/ALIGN 绕前方轴：spin+slip 同号 → 满额约 M1/M2 慢、M3 快
     self.orbit_front_spin = 40.0
     self.orbit_front_slip = 60.0
     self.orbit_front_flip = False
-    self.final_approach_timeout_ms = 5000
     self.approach_cluster_timeout_ms = 15000
     self.drive_timeout_ms = 5000
     self.push_timeout_ms = 3000
-    # PUSH 视觉防推空：连续 N 帧丢失→找物；过偏→慢纠；左侧容差更宽（副车兜底）
     self.push_watch_frames = 2
-    self.push_cx_left_min = 8.0    # cx 下限（偏左更宽容）
-    self.push_cx_right_max = 78.0  # cx 上限（偏右更严）
-    self.push_correct_duty = 10.0  # 过偏慢纠前向占空比
-    self.push_lost_blind_ms = 600  # 盲区后仅贴头遮挡可继续推；划走丢失→reseek
-    self.backoff_retreat_min_ms = 450  # BACKOFF 后退最少保持时间（防 on_line 抖动）
-    self.backoff_spin_deg = 170.0   # BACKOFF 开环自旋目标角度（°）
-    self.recover_backoff_ms = 500      # BACKOFF 后退最大超时
+    self.push_cx_left_min = 8.0
+    self.push_cx_right_max = 78.0
+    self.push_correct_duty = 10.0
+    self.push_lost_blind_ms = 600
+    self.backoff_retreat_min_ms = 450
+    self.backoff_spin_deg = 170.0
+    self.recover_backoff_ms = 500
     self.home_timeout_ms = 12000
     self.align_tol_deg = 12.0
     self.debug_output = False
-
-    # ——— TCS 颜色传感器 ———
-    self.tcs_confirm_n = 2          # 黄线确认帧数
-    self.tcs_r_min = 0.28           # 黄线 R 下限
-    self.tcs_g_min = 0.28           # 黄线 G 下限
-    self.tcs_b_max = 0.25           # 黄线 B 上限
-    self.tcs_c_min = 800            # 黄线最低亮度
-
-    # ——— 搜索 / 接近超时 ———
-    self.pick_timeout_ms = 20000    # HUNT 超时
-    self.pick_class_timeout_ms = 8000  # 兼容旧配置；换类已改帧计数
-    self.pick_class_frames = 6      # 队首连续 N 帧无物→队尾；见某物→置队首
-    self.center_fwd_ms = 4000       # BACKOFF 后前进寻物超时→SPIN
-    self.approach_timeout_ms = 15000  # 旧 TRACK；HUNT 用 pick_timeout
-    self.home_backoff_ms = 1500     # HOME 离线倒车超时
-
-    # ——— IMU 融合 ———
+    self.tcs_confirm_n = 2
+    self.tcs_r_min = 0.28
+    self.tcs_g_min = 0.28
+    self.tcs_b_max = 0.25
+    self.tcs_c_min = 800
+    self.pick_timeout_ms = 20000
+    self.pick_class_frames = 6
+    self.center_fwd_ms = 4000
+    self.home_backoff_ms = 1500
     self.imu_calibrate_samples = 100
     self.imu_beta = 0.05
     self.imu_gyro_still = 0.0175
@@ -118,7 +202,6 @@ class Config:
     self.imu_mag_still_need = 100
     self.imu_still_needed = 100
     self.imu_mag_lpf_alpha = 0.01
-    # 关磁靠墙: 少28°→1.084; +6°→1.103; CCW少10°→1.135
     self.imu_gyro_scale = 1.135
     self.imu_spin_beta = 0.01
     self.imu_spin_dps = 40.0
@@ -129,290 +212,39 @@ class Config:
       return float(self.hdg_off[i])
     return 0.0
 
-  # ——— 序列化（JSON key 全中文）——————————————————————
+  def _get_path(self, path):
+    if isinstance(path, tuple):
+      return getattr(getattr(self, path[0]), path[1])
+    return getattr(self, path)
+
+  def _set_path(self, path, value):
+    if isinstance(path, tuple):
+      setattr(getattr(self, path[0]), path[1], value)
+    else:
+      setattr(self, path, value)
 
   def to_dict(self):
-    return {
-      # 航向 PID
-      "航向P": float(self.heading.kp),
-      "航向上限": float(self.heading.max_out),
-      "航向死区": float(self.heading.deadband),
-      # 跟踪 PID
-      "跟踪P": float(self.tracking_bearing.kp),
-      "跟踪上限": float(self.tracking_bearing.max_out),
-      "跟踪死区": float(self.tracking_bearing.deadband),
-      # 跟踪参数
-      "接近速度": float(self.tracking.approach_speed),
-      "最终接近速度": float(self.tracking.final_approach_speed),
-      "搜索速度": float(self.tracking.search_speed),
-      "目标类别": int(self.tracking.target_class),
-      "最低置信度": int(self.tracking.min_confidence),
-      "确认帧数": int(self.tracking.confirm_frames),
-      "丢失帧数": int(self.tracking.lost_frames),
-      "停止位置": float(self.tracking.stop_bottom_pct),
-      "绕行起始位置": float(self.tracking.stage_bottom_pct),
-      "接触位置": float(self.tracking.contact_bottom_pct),
-      "视觉执行极性": float(self.tracking.bearing_actuation_sign),
-      "倒车角度": float(self.tracking.reverse_angle),
-      "相机超时": int(self.tracking.cam_timeout_ms),
-      # 磁力计
-      "磁力计开关": bool(self.mag_enabled),
-      "磁力计X偏移": float(self.mag_ox),
-      "磁力计Y偏移": float(self.mag_oy),
-      "磁力计Z偏移": float(self.mag_oz),
-      # 比赛
-      "目标个数": int(self.match_target_count),
-      "发车位置": int(self.start_layout),
-      "比赛模式": str(self.match_mode),
-      "场心航向": float(self.push_hdg_ref),
-      "推箱偏角": [float(x) for x in self.hdg_off],
-      "搜索顺序": [int(x) for x in self.match_order],
-      "严格目标": bool(self.strict_target),
-      "单车目标类别": int(self.single_target_class),
-      "行驶占空比": float(self.drive_duty),
-      "推箱占空比": float(self.push_duty),
-      "航向执行极性": float(self.yaw_actuation_sign),
-      "绕行速度": float(self.orbit_speed),
-      "绕行方向": float(self.orbit_direction_sign),
-      "绕行距离P": float(self.orbit_radial_kp),
-      "绕行距离上限": float(self.orbit_radial_max),
-      "绕行超时": int(self.orbit_timeout_ms),
-      "绕行航向容差": float(self.orbit_yaw_tol_deg),
-      "绕行居中容差": float(self.orbit_center_tol_pct),
-      "绕行距离容差": float(self.orbit_range_tol_pct),
-      "绕行确认帧数": int(self.orbit_confirm_frames),
-      "绕行丢失帧数": int(self.orbit_lost_frames),
-      "绕轴自旋": float(self.orbit_front_spin),
-      "绕轴侧移": float(self.orbit_front_slip),
-      "绕轴翻转": bool(self.orbit_front_flip),
-      "最终接近超时": int(self.final_approach_timeout_ms),
-      "绕物总超时": int(self.approach_cluster_timeout_ms),
-      "行驶超时": int(self.drive_timeout_ms),
-      "推箱超时": int(self.push_timeout_ms),
-      "推箱监护帧数": int(self.push_watch_frames),
-      "推箱左容差": float(self.push_cx_left_min),
-      "推箱右容差": float(self.push_cx_right_max),
-      "推箱纠偏占空比": float(self.push_correct_duty),
-      "推箱丢失盲区": int(self.push_lost_blind_ms),
-      "后退最少": int(self.backoff_retreat_min_ms),
-      "自旋角度": float(self.backoff_spin_deg),
-      "后退超时": int(self.recover_backoff_ms),
-      "回库超时": int(self.home_timeout_ms),
-      "航向容差": float(self.align_tol_deg),
-      "调试输出": bool(self.debug_output),
-      # TCS
-      "黄线确认帧数": int(self.tcs_confirm_n),
-      "黄线R下限": float(self.tcs_r_min),
-      "黄线G下限": float(self.tcs_g_min),
-      "黄线B上限": float(self.tcs_b_max),
-      "黄线亮度下限": int(self.tcs_c_min),
-      # 超时
-      "搜索超时": int(self.pick_timeout_ms),
-      "队首超时": int(self.pick_class_timeout_ms),
-      "队首换类帧数": int(self.pick_class_frames),
-      "回中前进超时": int(self.center_fwd_ms),
-      "接近超时": int(self.approach_timeout_ms),
-      "离线超时": int(self.home_backoff_ms),
-      # IMU
-      "标定采样数": int(self.imu_calibrate_samples),
-      "滤波增益": float(self.imu_beta),
-      "陀螺静止阈值": float(self.imu_gyro_still),
-      "加计静止阈值": float(self.imu_acc_still),
-      "零偏校正速率": float(self.imu_bias_alpha),
-      "磁融合速率": float(self.imu_mag_alpha),
-      "磁融合死区": float(self.imu_mag_dead),
-      "磁融合上限": float(self.imu_mag_pull_max),
-      "磁融合静止帧数": int(self.imu_mag_still_need),
-      "零偏静止帧数": int(self.imu_still_needed),
-      "磁参考LPFa": float(self.imu_mag_lpf_alpha),
-      "陀螺刻度": float(self.imu_gyro_scale),
-      "转动滤波增益": float(self.imu_spin_beta),
-      "转动角速度阈": float(self.imu_spin_dps),
-    }
+    d = {}
+    for k, path, _fn in _KEY_MAP:
+      v = self._get_path(path)
+      if isinstance(v, list):
+        d[k] = list(v)
+      else:
+        d[k] = v
+    return d
 
   def _apply_dict(self, d):
     for k, v in d.items():
       if k.startswith("//") or k.startswith("__"):
         continue
+      entry = _KEY_LOOKUP.get(k)
+      if entry is None:
+        continue
+      path, fn = entry
       try:
-        self._set_one(k, v)
+        self._set_path(path, fn(v))
       except Exception as e:
         info("CONFIG", "skip '%s': %s" % (k, e))
-
-  def _set_one(self, k, v):
-    # 航向 PID
-    if k == "航向P":
-      self.heading.kp = float(v)
-    elif k == "航向上限":
-      self.heading.max_out = float(v)
-    elif k == "航向死区":
-      self.heading.deadband = float(v)
-    # 跟踪 PID
-    elif k == "跟踪P":
-      self.tracking_bearing.kp = float(v)
-    elif k == "跟踪上限":
-      self.tracking_bearing.max_out = float(v)
-    elif k == "跟踪死区":
-      self.tracking_bearing.deadband = float(v)
-    # 跟踪参数
-    elif k == "接近速度":
-      self.tracking.approach_speed = float(v)
-    elif k == "最终接近速度":
-      self.tracking.final_approach_speed = float(v)
-    elif k == "搜索速度":
-      self.tracking.search_speed = float(v)
-    elif k == "目标类别":
-      self.tracking.target_class = int(v)
-    elif k == "最低置信度":
-      self.tracking.min_confidence = int(v)
-    elif k == "确认帧数":
-      self.tracking.confirm_frames = int(v)
-    elif k == "丢失帧数":
-      self.tracking.lost_frames = int(v)
-    elif k == "停止位置":
-      self.tracking.stop_bottom_pct = float(v)
-    elif k == "绕行起始位置":
-      self.tracking.stage_bottom_pct = float(v)
-    elif k == "接触位置":
-      self.tracking.contact_bottom_pct = float(v)
-    elif k == "视觉执行极性":
-      self.tracking.bearing_actuation_sign = float(v)
-    elif k == "倒车角度":
-      self.tracking.reverse_angle = float(v)
-    elif k == "相机超时":
-      self.tracking.cam_timeout_ms = int(v)
-    # 磁力计
-    elif k == "磁力计开关":
-      self.mag_enabled = bool(v)
-    elif k == "磁力计X偏移":
-      self.mag_ox = float(v)
-    elif k == "磁力计Y偏移":
-      self.mag_oy = float(v)
-    elif k == "磁力计Z偏移":
-      self.mag_oz = float(v)
-    # 比赛
-    elif k == "目标个数":
-      self.match_target_count = int(v)
-    elif k == "发车位置":
-      self.start_layout = int(v)
-    elif k == "比赛模式":
-      v = str(v).strip().lower()
-      self.match_mode = "pre" if v in ("pre", "预赛") else "final"
-    elif k == "场心航向":
-      self.push_hdg_ref = float(v)
-    elif k == "推箱偏角":
-      self.hdg_off = [float(x) for x in v]
-    elif k == "搜索顺序":
-      self.match_order = [int(x) for x in v]
-    elif k == "严格目标":
-      self.strict_target = bool(v)
-    elif k == "单车目标类别":
-      self.single_target_class = int(v)
-    elif k == "行驶占空比":
-      self.drive_duty = float(v)
-    elif k == "推箱占空比":
-      self.push_duty = float(v)
-    elif k == "航向执行极性":
-      self.yaw_actuation_sign = float(v)
-    elif k == "绕行速度":
-      self.orbit_speed = float(v)
-    elif k == "绕行方向":
-      self.orbit_direction_sign = float(v)
-    elif k == "绕行距离P":
-      self.orbit_radial_kp = float(v)
-    elif k == "绕行距离上限":
-      self.orbit_radial_max = float(v)
-    elif k == "绕行超时":
-      self.orbit_timeout_ms = int(v)
-    elif k == "绕行航向容差":
-      self.orbit_yaw_tol_deg = float(v)
-    elif k == "绕行居中容差":
-      self.orbit_center_tol_pct = float(v)
-    elif k == "绕行距离容差":
-      self.orbit_range_tol_pct = float(v)
-    elif k == "绕行确认帧数":
-      self.orbit_confirm_frames = int(v)
-    elif k == "绕行丢失帧数":
-      self.orbit_lost_frames = int(v)
-    elif k == "绕轴自旋":
-      self.orbit_front_spin = float(v)
-    elif k == "绕轴侧移":
-      self.orbit_front_slip = float(v)
-    elif k == "绕轴翻转":
-      self.orbit_front_flip = bool(v)
-    elif k == "最终接近超时":
-      self.final_approach_timeout_ms = int(v)
-    elif k == "绕物总超时":
-      self.approach_cluster_timeout_ms = int(v)
-    elif k == "行驶超时":
-      self.drive_timeout_ms = int(v)
-    elif k == "推箱超时":
-      self.push_timeout_ms = int(v)
-    elif k == "推箱监护帧数":
-      self.push_watch_frames = int(v)
-    elif k == "推箱左容差":
-      self.push_cx_left_min = float(v)
-    elif k == "推箱右容差":
-      self.push_cx_right_max = float(v)
-    elif k == "推箱纠偏占空比":
-      self.push_correct_duty = float(v)
-    elif k == "推箱丢失盲区":
-      self.push_lost_blind_ms = int(v)
-    elif k == "后退最少":
-      self.backoff_retreat_min_ms = int(v)
-    elif k == "自旋角度":
-      self.backoff_spin_deg = float(v)
-    elif k == "后退超时":
-      self.recover_backoff_ms = int(v)
-    elif k == "回库超时":
-      self.home_timeout_ms = int(v)
-    elif k == "航向容差":
-      self.align_tol_deg = float(v)
-    elif k == "调试输出":
-      self.debug_output = bool(v)
-    # TCS
-    elif k == "黄线确认帧数": self.tcs_confirm_n = int(v)
-    elif k == "黄线R下限": self.tcs_r_min = float(v)
-    elif k == "黄线G下限": self.tcs_g_min = float(v)
-    elif k == "黄线B上限": self.tcs_b_max = float(v)
-    elif k == "黄线亮度下限": self.tcs_c_min = int(v)
-    # 超时
-    elif k == "搜索超时": self.pick_timeout_ms = int(v)
-    elif k == "队首超时": self.pick_class_timeout_ms = int(v)
-    elif k == "队首换类帧数": self.pick_class_frames = int(v)
-    elif k == "回中前进超时": self.center_fwd_ms = int(v)
-    elif k == "接近超时": self.approach_timeout_ms = int(v)
-    elif k == "离线超时": self.home_backoff_ms = int(v)
-    # IMU
-    elif k == "标定采样数": self.imu_calibrate_samples = int(v)
-    elif k == "滤波增益": self.imu_beta = float(v)
-    elif k == "陀螺静止阈值": self.imu_gyro_still = float(v)
-    elif k == "加计静止阈值": self.imu_acc_still = float(v)
-    elif k == "零偏校正速率": self.imu_bias_alpha = float(v)
-    elif k == "磁融合速率": self.imu_mag_alpha = float(v)
-    elif k == "磁融合死区": self.imu_mag_dead = float(v)
-    elif k == "磁融合上限": self.imu_mag_pull_max = float(v)
-    elif k == "磁融合静止帧数": self.imu_mag_still_need = int(v)
-    elif k == "零偏静止帧数": self.imu_still_needed = int(v)
-    elif k == "磁参考LPFa": self.imu_mag_lpf_alpha = float(v)
-    elif k == "陀螺刻度": self.imu_gyro_scale = float(v)
-    elif k == "转动滤波增益": self.imu_spin_beta = float(v)
-    elif k == "转动角速度阈": self.imu_spin_dps = float(v)
-
-  @classmethod
-  def load(cls, path=CONFIG_FILE):
-    cfg = cls()
-    try:
-      with open(path, "r") as f:
-        d = json.load(f)
-        if isinstance(d, dict):
-          cfg._apply_dict(d)
-        else:
-          info("CONFIG", "invalid JSON, reset to default")
-          cfg.save(path)
-    except (OSError, ValueError):
-      cfg.save(path)
-    return cfg
 
   def save(self, path=CONFIG_FILE):
     tmp = path + ".tmp"
@@ -437,7 +269,3 @@ def load_config():
     except (OSError, ValueError):
       pass
   return config
-
-
-def save_config():
-  config.save()

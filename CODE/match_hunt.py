@@ -26,12 +26,10 @@ class MatchHunt:
     self._queue_miss = 0
     self._queue_see = 0
     self._queue_see_cls = -1
-    self._search_phase = "reverse" if reverse else "spin"
     if reverse:
       self._search_dir = -self._search_dir
     if self._search_dir == 0:
       self._search_dir = 1
-    self._rev_acc = 0.0
     self._spin_acc = 0.0
     self._rev_start_yaw = self._yaw()
     self._bearing_pid.reset()
@@ -188,7 +186,6 @@ class MatchHunt:
 
   def _hunt_begin_reverse(self):
     self._sub = "SPIN"
-    self._search_phase = "spin"
     self._search_dir = -self._search_dir
     if self._search_dir == 0:
       self._search_dir = 1
@@ -281,7 +278,6 @@ class MatchHunt:
         if t is not None:
           self._lock_active_class(t[0])
         self._sub = "TRACK"
-        self._search_phase = "spin"
         self._lost_n = 0
         self._bearing_pid.reset()
         self._track_ms = now

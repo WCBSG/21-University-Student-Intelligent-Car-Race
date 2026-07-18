@@ -180,6 +180,8 @@ class ImuSensor:
     self._gyro_scale = 1.0         # 角速度比例标定（963 实车约 1.08）
     self._spin_beta = 0.01         # 高速转动时 Madgwick beta 上限（抑加计干扰）
     self._spin_dps = 40.0          # 超过此角速度启用 spin_beta
+    self._spin_active = False      # 当前是否在 spin 模式
+    self._resting_beta = beta      # 进入 spin 前的 beta，退出时恢复
 
   def update(self):
     """ticker 回调：标定 / 去偏 / Madgwick / 磁慢纠 / 快照。"""
@@ -242,13 +244,17 @@ class ImuSensor:
     gz_f = gz * s
 
     # 转动中降低 beta：加计受向心加速度污染时少拉姿态，保护 yaw
-    # 转动中降 beta 抑向心加速度；滞回退出防余振反复切换
-    beta_saved = self._filter.beta
+    # 滞回退出：进入 spin 时保存 beta，退出时恢复，防止 beta 永久锁在 spin_beta
     if self._gyro_dps >= self._spin_dps:
-      if self._spin_beta < beta_saved:
+      if not self._spin_active:
+        self._resting_beta = self._filter.beta
+        self._spin_active = True
+      if self._spin_beta < self._filter.beta:
         self._filter.beta = self._spin_beta
     elif self._gyro_dps < self._spin_dps * 0.5:
-      self._filter.beta = beta_saved
+      if self._spin_active:
+        self._filter.beta = self._resting_beta
+        self._spin_active = False
     self._filter.update(gx_f, gy_f, gz_f, ax, ay, az)
 
     self._mx = _mx - self._mag_off[0]

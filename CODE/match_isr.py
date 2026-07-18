@@ -4,9 +4,6 @@ from time import ticks_ms, ticks_diff
 from log import info
 from motion import MotionControl, wrap_deg
 
-# 兼容旧名：match.py 等可 `from match_isr import wrap`
-wrap = wrap_deg
-
 
 class MatchIsr:
   def flush_deferred(self):

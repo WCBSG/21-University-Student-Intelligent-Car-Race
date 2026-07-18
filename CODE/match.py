@@ -40,9 +40,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._vision_lost = 0
     self._confirm_n = 0
     self._lost_n = 0
-    self._search_phase = "spin"
     self._search_dir = 1
-    self._rev_acc = 0.0
     self._rev_start_yaw = 0.0
     self._approach_deadline = 0
     self._cmd_forward = 0.0
@@ -123,7 +121,6 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._see_streak = 0
     self._confirm_n = 0
     self._lost_n = 0
-    self._search_phase = "spin"
     self._search_dir = 1
     self._sub = ""
     self._phase_ms = ticks_ms()
@@ -213,7 +210,7 @@ class MatchRunner(MatchIsr, MatchHunt):
   def _yaw_err(self, target):
     return wrap_deg(target - self._yaw())
 
-  def _take_motors(self, abort=False):
+  def _take_motors(self):
     self._arb.acquire(self.OWNER)
 
   def _on_line(self, sensors):
