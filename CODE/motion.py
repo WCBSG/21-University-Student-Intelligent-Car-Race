@@ -149,61 +149,65 @@ class MotorArbiter:
 # =============================================================================
 
 class HeadingPID:
-  def __init__(self, kp=2.0, ki=0.0, kd=0.0, max_output=100.0, deadband=0.0,
-               gains=None):
+  """纯 P 航向控制器。"""
+  def __init__(self, kp=2.0, max_output=100.0, deadband=0.0, gains=None):
     self._g = gains
-    self.kp = kp; self.ki = ki; self.kd = kd
+    self.kp = kp
     self.max_output = max_output; self.deadband = deadband
-    self._integral = 0.0; self._prev_error = 0.0; self._first_update = True
 
   def _params(self):
     g = self._g
     if g is not None:
-      return g.kp, g.ki, g.kd, g.max_out, g.deadband
-    return self.kp, self.ki, self.kd, self.max_output, self.deadband
+      return g.kp, g.max_out, g.deadband
+    return self.kp, self.max_output, self.deadband
 
   def update(self, error, dt):
-    kp, ki, kd, mx, db = self._params()
-    if abs(error) < db: error = 0.0
-    if self._first_update:
-      self._prev_error = error; self._first_update = False
+    kp, mx, db = self._params()
+    if abs(error) < db:
       return 0.0
-    self._integral += error * dt
-    d = (error - self._prev_error) / dt if dt > 1e-6 else 0.0
-    out = kp * error + ki * self._integral + kd * d
-    # 反算钳位：输出饱和时立即修正积分，避免恢复缓慢
+    out = kp * error
     if out > mx:
       out = mx
-      if ki > 1e-9:
-        self._integral = (mx - kp * error - kd * d) / ki
     elif out < -mx:
       out = -mx
-      if ki > 1e-9:
-        self._integral = (-mx - kp * error - kd * d) / ki
-    self._prev_error = error
     return out
 
   def reset(self):
-    self._integral = 0.0; self._prev_error = 0.0; self._first_update = True
+    pass
 
 
 # =============================================================================
-#                           select_target — 目标筛选
+#                           角度 / 目标筛选
 # =============================================================================
 
-def select_target(detections, cfg):
-  if not detections: return None
-  tc, mc = int(cfg.tracking.target_class), cfg.tracking.min_confidence
-  allow = getattr(cfg, "match_allow", None)
+def wrap_deg(a):
+  while a > 180.0:
+    a -= 360.0
+  while a < -180.0:
+    a += 360.0
+  return a
+
+
+def select_target(detections, cfg, allow=None, target_class=None):
+  """allow / target_class 由 MatchRunner 注入；未传则用 cfg.tracking。"""
+  if not detections:
+    return None
+  tc = int(cfg.tracking.target_class) if target_class is None else int(target_class)
+  mc = cfg.tracking.min_confidence
   candidates = []
   for d in detections:
     cid, sc = d[0], d[1]
     if allow is not None:
-      if cid not in allow: continue
-    elif tc != 7 and cid != tc: continue
-    if sc < mc: continue
-    if d[4] <= 0 or d[5] <= 0: continue
+      if cid not in allow:
+        continue
+    elif tc != 7 and cid != tc:
+      continue
+    if sc < mc:
+      continue
+    if d[4] <= 0 or d[5] <= 0:
+      continue
     candidates.append(d)
-  if not candidates: return None
+  if not candidates:
+    return None
   candidates.sort(key=lambda x: (0 if x[0] == tc or tc == 7 else 1, -x[8]))
   return candidates[0]

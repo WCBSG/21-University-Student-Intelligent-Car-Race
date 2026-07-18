@@ -1,25 +1,23 @@
 # match.py — MatchRunner 核心 + HOME（ISR/Hunt 为 mixin，分文件编译）
+# 主车：视觉/运动/计分/回库。单一 Match 状态机，全程占用电机。
 from time import ticks_ms, ticks_diff, ticks_add
 from log import info
-from motion import MotionControl, HeadingPID
+from motion import MotionControl, HeadingPID, wrap_deg
 from config import CLS_LEFT, CLS_RIGHT
-from match_isr import MatchIsr, wrap as _wrap
+from match_isr import MatchIsr
 from match_hunt import MatchHunt
 
-ABORT = "ABORT"
-STOP = "STOP"
-
-_MATCH_PHASES = ("PICK", "APPROACH", "ORBIT", "FINAL_APPROACH", "PUSH", "BACKOFF")
+_MATCH_PHASES = ("SEARCH", "TRACK", "FACE", "FINAL_APPROACH", "PUSH", "BACKOFF")
 
 
 class MatchRunner(MatchIsr, MatchHunt):
   OWNER = "MATCH"
 
-  def __init__(self, robot, arbiter, tcs, cfg):
-    self._robot = robot
+  def __init__(self, arbiter, tcs, cfg, imu):
     self._arb = arbiter
     self._tcs = tcs
     self._cfg = cfg
+    self._imu = imu
     self.phase = "IDLE"
     self.scored_count = 0
     self._sub = ""
@@ -27,6 +25,9 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._see_streak = 0
     self._remaining = []
     self._active_cls = None
+    # 视觉筛选（运行时状态，不写回 cfg）
+    self._match_allow = None
+    self._filter_class = int(cfg.tracking.target_class)
     self._yaw_target = 0.0
     self._hold_yaw = 0.0
     self._home_y2 = None
@@ -35,8 +36,15 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._bearing_pid = HeadingPID(gains=cfg.tracking_bearing)
     self._hdg_ms = ticks_ms()
     self._ctrl_ms = ticks_ms()
+    self._track_ms = ticks_ms()
     self._orbit_confirm = 0
     self._vision_lost = 0
+    self._confirm_n = 0
+    self._lost_n = 0
+    self._search_phase = "spin"
+    self._search_dir = 1
+    self._rev_acc = 0.0
+    self._rev_start_yaw = 0.0
     self._approach_deadline = 0
     self._cmd_forward = 0.0
     self._cmd_lateral = 0.0
@@ -58,12 +66,20 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._bo_spin = [0.0, 0.0, 0.0]
 
   @property
+  def match_allow(self):
+    return self._match_allow
+
+  @property
+  def filter_class(self):
+    return self._filter_class
+
+  @property
   def backoff_busy(self):
     return self._backoff_busy
 
   @property
   def field_lock_enabled(self):
-    return self.phase in ("PICK", "APPROACH", "ORBIT", "FINAL_APPROACH", "PUSH")
+    return self.phase in ("SEARCH", "TRACK", "FACE", "FINAL_APPROACH", "PUSH")
 
   @property
   def stage(self):
@@ -95,10 +111,14 @@ class MatchRunner(MatchIsr, MatchHunt):
     self.fault_reason = ""
     self._approach_deadline = 0
     self._see_streak = 0
+    self._confirm_n = 0
+    self._lost_n = 0
+    self._search_phase = "spin"
+    self._search_dir = 1
     self._sub = ""
     self._phase_ms = ticks_ms()
-    c.tracking.target_class = 7
-    c.match_allow = None
+    self._filter_class = 7
+    self._match_allow = None
     self._hold_yaw = self._yaw()
     self._hdg_pid.reset()
     self._hdg_ms = ticks_ms()
@@ -113,7 +133,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._def_armed = False
     self._cache_backoff_duties()
     self.phase = "LEAVE"
-    self._take_motors(abort=True)
+    self._take_motors()
     info("MATCH", "START → LEAVE hold_yaw=%.1f" % self._hold_yaw)
     return True
 
@@ -125,9 +145,8 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._want_home = False
     self.phase = "IDLE"
     self._sub = ""
-    self._cfg.match_allow = None
-    self._cfg.tracking.target_class = 7
-    self._robot.handle(ABORT)
+    self._match_allow = None
+    self._filter_class = int(self._cfg.tracking.target_class)
     self._brake()
 
   def tick(self, dt, sensors):
@@ -140,18 +159,18 @@ class MatchRunner(MatchIsr, MatchHunt):
       if action == "HOME":
         self._enter_home()
       else:
-        self._enter_pick()
+        self._enter_search()
       return
     if self._backoff_busy:
       return
     if self.phase == "LEAVE":
       self._tick_leave(sensors)
-    elif self.phase == "PICK":
-      self._tick_pick(sensors)
-    elif self.phase == "APPROACH":
-      self._tick_approach(sensors)
-    elif self.phase == "ORBIT":
-      self._tick_orbit(sensors)
+    elif self.phase == "SEARCH":
+      self._tick_search(sensors)
+    elif self.phase == "TRACK":
+      self._tick_track(sensors)
+    elif self.phase == "FACE":
+      self._tick_face(sensors)
     elif self.phase == "FINAL_APPROACH":
       self._tick_final_approach(sensors)
     elif self.phase == "PUSH":
@@ -160,13 +179,12 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._tick_home(sensors)
 
   def _yaw(self):
-    return self._robot._imu.get_yaw()
+    return self._imu.get_yaw()
 
   def _yaw_err(self, target):
-    return _wrap(target - self._yaw())
+    return wrap_deg(target - self._yaw())
 
   def _take_motors(self, abort=False):
-    self._robot.handle(ABORT if abort else STOP)
     self._arb.acquire(self.OWNER)
 
   def _on_line(self, sensors):
@@ -242,6 +260,28 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._set_command(0.0, 0.0, d)
     self._arb.write(self.OWNER, [d, d, d])
 
+  def _write_orbit_front(self, spin, slip, forward=0.0):
+    """绕车头前方轴转：spin+slip 同号 → M1/M2 慢、M3 快（见 test_orbit_axis）。
+    满额 spin=40/slip=60 → 约 (20,20,80)。"""
+    if self._backoff_busy:
+      return
+    spin = float(spin)
+    slip = float(slip)
+    if slip >= 0.0:
+      side = MotionControl.move(slip, 90.0)
+    else:
+      side = MotionControl.move(-slip, -90.0)
+    if abs(forward) > 1e-6:
+      fwd = MotionControl.move(float(forward), 0.0)
+    else:
+      fwd = (0.0, 0.0, 0.0)
+    duties = [
+      self._clamp(fwd[i] + side[i] + spin, -100.0, 100.0)
+      for i in range(3)
+    ]
+    self._set_command(forward, slip, spin)
+    self._arb.write(self.OWNER, duties)
+
   def _hold_brake(self):
     self._set_command(0.0, 0.0, 0.0)
     self._arb.hold_brake(self.OWNER)
@@ -265,7 +305,6 @@ class MatchRunner(MatchIsr, MatchHunt):
     self.fault_reason = str(why)
     self._backoff_busy = False
     self._post_backoff = None
-    self._robot.handle(ABORT)
     self._brake()
     self.phase = "FAULT"
     self._sub = ""
@@ -274,10 +313,9 @@ class MatchRunner(MatchIsr, MatchHunt):
     info("MATCH", "%s → skip cls=%s" % (why, self._active_cls))
     if self._active_cls is not None and self._active_cls in self._remaining:
       self._remaining.remove(self._active_cls)
-    elif self._remaining:
-      self._remaining.pop(0)
+      self._remaining.append(self._active_cls)
     if self._remaining:
-      self._enter_pick()
+      self._enter_search()
     else:
       self._fault("%s; no target class left (%d/%d scored)" % (
         why, self.scored_count, int(self._cfg.match_target_count)))
@@ -294,30 +332,31 @@ class MatchRunner(MatchIsr, MatchHunt):
     c = self._cfg
     strict_cls = int(getattr(c, "single_target_class", -1))
     if getattr(c, "strict_target", False) and 0 <= strict_cls <= 2:
-      c.match_allow = None
-      c.tracking.target_class = strict_cls
+      self._match_allow = None
+      self._filter_class = strict_cls
       self._active_cls = strict_cls
       return
-    if c.match_mode == "pre" or not self._remaining:
-      c.tracking.target_class = 7
-      c.match_allow = None
-      self._active_cls = None
+    if self._remaining:
+      self._match_allow = list(self._remaining)
     else:
-      c.match_allow = list(self._remaining)
-      c.tracking.target_class = int(self._remaining[0])
-      self._active_cls = int(self._remaining[0])
+      self._match_allow = None
+    self._filter_class = 7
+    self._active_cls = None
 
   def _push_yaw(self):
+    """决赛推箱车头朝向 = 场心 + 推箱偏角（物品应去的方向）。
+    车须站在该方向反侧、朝该方向推；FACE 只负责转到此朝向。
+    """
     c = self._cfg
     if c.match_mode == "pre":
       return None
     cls = self._active_cls
     if cls is None:
-      cls = c.tracking.target_class
+      cls = self._filter_class
     off = c.hdg_off_for(cls)
     if off == 0.0 and all(abs(float(x)) < 1e-6 for x in c.hdg_off):
       return None
-    return _wrap(c.push_hdg_ref + off)
+    return wrap_deg(c.push_hdg_ref + off)
 
   def _home_plan(self):
     c = self._cfg
@@ -326,12 +365,12 @@ class MatchRunner(MatchIsr, MatchHunt):
     left = c.hdg_off_for(CLS_LEFT)
     right = c.hdg_off_for(CLS_RIGHT)
     if layout == 2:
-      return _wrap(href + left), _wrap(href + 180.0)
+      return wrap_deg(href + left), wrap_deg(href + 180.0)
     if layout == 3:
-      return _wrap(href + right), _wrap(href + 180.0)
+      return wrap_deg(href + right), wrap_deg(href + 180.0)
     if layout == 4:
-      return _wrap(href + left), None
-    return _wrap(href + 180.0), None
+      return wrap_deg(href + left), None
+    return wrap_deg(href + 180.0), None
 
   def _enter_home(self):
     y1, y2 = self._home_plan()
@@ -355,69 +394,82 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._fault("HOME timeout — gate not confirmed")
       return
     on_line = self._on_line(sensors)
-    if self._sub == "LEAVE_LINE":
-      if not on_line:
-        self._sub = "LEG1_TURN"
-        self._phase_ms = now
-        info("MATCH", "HOME → LEG1_TURN")
-        return
-      self._write_move(-float(self._cfg.drive_duty), 0.0)
+    sub = self._sub
+    if sub == "LEAVE_LINE":
+      self._home_leave_line(now, on_line)
+    elif sub == "LEG1_TURN":
+      self._home_leg1_turn(now)
+    elif sub == "LEG1_DRIVE":
+      self._home_leg1_drive(now, on_line)
+    elif sub == "BACKOFF":
+      self._home_backoff(now, on_line)
+    elif sub == "BACKOFF_TURN":
+      self._home_backoff_turn(now)
+    elif sub == "LEG2_DRIVE":
+      self._home_leg2_drive(on_line)
+
+  def _home_leave_line(self, now, on_line):
+    if not on_line:
+      self._sub = "LEG1_TURN"
+      self._phase_ms = now
+      info("MATCH", "HOME → LEG1_TURN")
       return
-    if self._sub == "LEG1_TURN":
-      if self._spin_toward(self._yaw_target):
-        self._hold_yaw = self._yaw_target
-        self._hdg_pid.reset()
-        self._sub = "LEG1_DRIVE"
-        self._phase_ms = now
-        self._tcs.reset_crossed()
-        info("MATCH", "HOME → LEG1_DRIVE")
-      return
-    if self._sub == "LEG1_DRIVE":
-      if on_line:
-        if self._home_y2 is None:
-          self._brake()
-          self._finish()
-          return
-        self._hold_brake()
-        self._sub = "BACKOFF"
-        self._phase_ms = now
-        info("MATCH", "HOME → BACKOFF")
-        return
-      if abs(self._yaw_err(self._hold_yaw)) > 12.0:
-        self._spin_toward(self._hold_yaw)
-        return
-      self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
-      return
-    if self._sub == "BACKOFF":
-      if not on_line or ticks_diff(now, self._phase_ms) > int(self._cfg.home_backoff_ms):
-        self._hold_brake()
-        self._sub = "BACKOFF_TURN"
-        self._phase_ms = now
-        info("MATCH", "HOME → BACKOFF turn")
-        return
-      self._write_move(-float(self._cfg.drive_duty), 0.0)
-      return
-    if self._sub == "BACKOFF_TURN":
-      if self._spin_toward(self._home_y2):
-        self._hold_yaw = self._home_y2
-        self._hdg_pid.reset()
-        self._sub = "LEG2_DRIVE"
-        self._phase_ms = now
-        self._tcs.reset_crossed()
-        info("MATCH", "HOME → LEG2_DRIVE")
-      return
-    if self._sub == "LEG2_DRIVE":
-      if on_line:
+    self._write_move(-float(self._cfg.drive_duty), 0.0)
+
+  def _home_leg1_turn(self, now):
+    if self._spin_toward(self._yaw_target):
+      self._hold_yaw = self._yaw_target
+      self._hdg_pid.reset()
+      self._sub = "LEG1_DRIVE"
+      self._phase_ms = now
+      self._tcs.reset_crossed()
+      info("MATCH", "HOME → LEG1_DRIVE")
+
+  def _home_leg1_drive(self, now, on_line):
+    if on_line:
+      if self._home_y2 is None:
+        self._brake()
         self._finish()
         return
-      if abs(self._yaw_err(self._hold_yaw)) > 12.0:
-        self._spin_toward(self._hold_yaw)
-        return
-      self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
+      self._hold_brake()
+      self._sub = "BACKOFF"
+      self._phase_ms = now
+      info("MATCH", "HOME → BACKOFF")
+      return
+    if abs(self._yaw_err(self._hold_yaw)) > 12.0:
+      self._spin_toward(self._hold_yaw)
+      return
+    self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
+
+  def _home_backoff(self, now, on_line):
+    if not on_line or ticks_diff(now, self._phase_ms) > int(self._cfg.home_backoff_ms):
+      self._hold_brake()
+      self._sub = "BACKOFF_TURN"
+      self._phase_ms = now
+      info("MATCH", "HOME → BACKOFF turn")
+      return
+    self._write_move(-float(self._cfg.drive_duty), 0.0)
+
+  def _home_backoff_turn(self, now):
+    if self._spin_toward(self._home_y2):
+      self._hold_yaw = self._home_y2
+      self._hdg_pid.reset()
+      self._sub = "LEG2_DRIVE"
+      self._phase_ms = now
+      self._tcs.reset_crossed()
+      info("MATCH", "HOME → LEG2_DRIVE")
+
+  def _home_leg2_drive(self, on_line):
+    if on_line:
+      self._finish()
+      return
+    if abs(self._yaw_err(self._hold_yaw)) > 12.0:
+      self._spin_toward(self._hold_yaw)
+      return
+    self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
 
   def _finish(self):
     self._brake()
-    self._robot.handle(STOP)
     self.phase = "DONE"
     self._sub = ""
     info("MATCH", "DONE scored=%d" % self.scored_count)
@@ -437,12 +489,12 @@ class MatchRunner(MatchIsr, MatchHunt):
       target_yaw = self._yaw_target
     yaw = self._yaw()
     return (
-      self.phase, self._sub, yaw, target_yaw, _wrap(target_yaw - yaw),
+      self.phase, self._sub, yaw, target_yaw, wrap_deg(target_yaw - yaw),
       cx, y2, self._cmd_forward, self._cmd_lateral, self._cmd_rotation,
       self._orbit_confirm, self._vision_lost)
 
   @property
-  def info(self):
+  def status_text(self):
     if self._sub:
       return "Match:%s/%s scored=%d" % (self.phase, self._sub, self.scored_count)
     return "Match:%s scored=%d" % (self.phase, self.scored_count)

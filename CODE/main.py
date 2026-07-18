@@ -35,15 +35,10 @@ load_config()
 log_setup(cfg.debug_output)
 
 # —— 提前 import 大模块（分文件 + 分步，压单文件编译峰值 OOM） ——
-# Match 不依赖 robot 模块本体（常量本地化），先 import 可多留几 KB
 info("MAIN", "Match import...")
 _mem("pre-match")
 from match import MatchRunner
 _mem("post-match")
-info("MAIN", "Robot import...")
-_mem("pre-robot")
-from robot import build_robot
-_mem("post-robot")
 
 info("MAIN", "IMU963...")
 from imu import ImuSensor
@@ -76,26 +71,38 @@ _tcs_on_line = False   # ISR 更新的黄线电平
 _match_ref = None      # MatchRunner；实例化后挂上，供 ISR 场锁
 
 
-def _on_tick(_):
-  global _imu_err_n, _tcs_on_line
+def _on_tick_imu(_):
+  """200Hz — IMU 更新（始终运行）"""
+  global _imu_err_n
   try:
     imu.update()
-    if _tcs_ready:
-      tcs.crossed_yellow()           # ★ 在 200Hz 中断中更新 TCS 状态, GC 无影响
-      _tcs_on_line = tcs.on_line
-    # ★ 场内黄线 → 原子 BACKOFF（不受主循环 GC 拖慢）
-    if _match_ref is not None:
-      _match_ref.isr_field_lock()
   except Exception as e:
     _imu_err_n += 1
     if _imu_err_n <= 3:
       info("IMU", "update err: %s" % e)
 
 
-tkr = ticker(1)
-tkr.capture_list(imu.raw)
-tkr.callback(_on_tick)
-tkr.start(5)
+def _on_tick_tcs(_):
+  """100Hz — TCS 黄线 + 场锁 BACKOFF（仅比赛期间运行）"""
+  global _tcs_on_line
+  try:
+    if _tcs_ready:
+      tcs.crossed_yellow()
+      _tcs_on_line = tcs.on_line
+    if _match_ref is not None:
+      _match_ref.isr_field_lock()
+  except Exception:
+    pass
+
+
+tkr_imu = ticker(1)
+tkr_imu.capture_list(imu.raw)
+tkr_imu.callback(_on_tick_imu)
+tkr_imu.start(5)  # 200Hz
+
+tkr_tcs = ticker(2)
+tkr_tcs.callback(_on_tick_tcs)
+# 暂不启动 — 进入比赛阶段后以 100Hz 启动
 
 info("MAIN", "Camera UART5...")
 from camera import CameraRx
@@ -115,8 +122,7 @@ _mem("tcs")
 # —— 实例化（所有硬件依赖已就绪） ——
 info("MAIN", "Match build...")
 _mem("pre-build")
-robot = build_robot(arbiter, cfg, imu)
-match = MatchRunner(robot, arbiter, tcs, cfg)
+match = MatchRunner(arbiter, tcs, cfg, imu)
 _match_ref = match
 _mem("ready")
 
@@ -142,7 +148,12 @@ def _build_sensors():
       raw_n = frame.num
       _has_target = frame.has_target
       if _has_target:
-        _target = select_target(frame.detections, cfg)
+        if match.is_running:
+          _target = select_target(
+            frame.detections, cfg,
+            allow=match.match_allow, target_class=match.filter_class)
+        else:
+          _target = select_target(frame.detections, cfg)
         _has_target = _target is not None
         if _has_target:
           _y2 = _target[9]
@@ -153,9 +164,10 @@ def _build_sensors():
           if raw_n > 0 and ticks_diff(now, _filt_ms) > 1000:
             _filt_ms = now
             d0 = frame.detections[0]
+            want = match.filter_class if match.is_running else cfg.tracking.target_class
+            allow = match.match_allow if match.is_running else None
             info("CAM", "filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
-              raw_n, int(d0[0]), int(d0[1]),
-              cfg.tracking.target_class, getattr(cfg, "match_allow", None)))
+              raw_n, int(d0[0]), int(d0[1]), want, allow))
       else:
         _target = None
         _y2 = 0.0
@@ -172,7 +184,7 @@ def _build_sensors():
     _y2 = 0.0
     _last_frame_ms = 0
 
-  # ★ TCS 已由 200Hz ISR 轮询, 此处直接读电平, 不被 GC 影响
+  # ★ TCS 已由 100Hz ISR 轮询, 此处直接读电平
   on_line = _tcs_on_line
 
   return {
@@ -181,8 +193,6 @@ def _build_sensors():
     "target": _target,
     "y2": _y2,
     "cam_timeout": cam_timeout,
-    "tcs_crossed": False,
-    "tcs_yellow": on_line,
     "tcs_on_line": on_line,
   }
 
@@ -279,6 +289,7 @@ while True:
       if phase in ("RUN", "FAULT"):
         match.stop()
         phase = "IDLE"
+        tkr_tcs.stop()
         info("MATCH", "ABORT by C20 → IDLE")
       elif phase in ("IDLE", "DONE"):
         if not _imu_ok:
@@ -289,6 +300,7 @@ while True:
           info("MATCH", "Camera not ready — cannot start")
         elif match.start():
           phase = "RUN"
+          tkr_tcs.start(10)  # 100Hz TCS + 场锁
           info("MATCH", "GO! scored reset")
         else:
           info("MATCH", "start refused phase=%s" % match.phase)
@@ -306,22 +318,21 @@ while True:
   # —— 业务 ——
   sensors = _build_sensors()
   imu._motor_on = arbiter.motors_active
-  # BACKOFF 期间 ISR 独占电机，主循环不写 Robot/Match 运动
-  if not match.backoff_busy:
-    robot.tick(dt, sensors)
+  # BACKOFF 时 match.tick 仅 flush；ISR 独占电机写
   match.tick(dt, sensors)
 
   if phase == "RUN":
     LED.low()
     if match.phase != _last_match_phase:
       _last_match_phase = match.phase
-      info("MATCH", "%s robot=%s scored=%d" % (
-        match.info, robot.state, match.scored_count))
+      info("MATCH", "%s scored=%d" % (match.status_text, match.scored_count))
     if not match.is_running and match.phase == "DONE":
       phase = "DONE"
+      tkr_tcs.stop()
       info("MATCH", "DONE scored=%d — C20 to run again" % match.scored_count)
     elif match.phase == "FAULT":
       phase = "FAULT"
+      tkr_tcs.stop()
       info("MATCH", "FAULT: %s — C20 to acknowledge" % match.fault_reason)
   elif phase == "DONE":
     # 闪烁提示完赛
@@ -345,8 +356,8 @@ while True:
     yaw = imu.get_yaw()
     ht = "Y" if sensors.get("has_target") else "N"
     yl = "Y" if sensors.get("tcs_on_line") else "N"
-    info("STAT", "%s stage=%s match=%s robot=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
-     phase, match.stage, match.info, robot.state, yaw, ht, yl, gc.mem_free()))
+    info("STAT", "%s stage=%s match=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
+     phase, match.stage, match.status_text, yaw, ht, yl, gc.mem_free()))
 
   if cfg.debug_output and ticks_diff(now, _last_cal_ms) >= 500:
     _last_cal_ms = now
