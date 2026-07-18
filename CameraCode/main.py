@@ -1,58 +1,18 @@
 # CameraCode/main.py — OpenART Plus (自包含)
 # 优化: sensor→UART→tf.load→snapshot, 失败重试
-import sensor, image, time, gc, os
-try:
-  from machine import UART
-except ImportError:
-  from pyb import UART
-try:
-  import tf
-except ImportError:
-  tf = None
+import sensor, image, time, gc
+from machine import UART
+import tf
 
 # 0=sandbag/左 1=netball/上 2=bear/右（与 MCU config 一致）
 CLASS_NAMES = ('sandbag', 'netball', 'bear')
 UART_ID = 12
 BAUD = 460800
 CONF_MIN = 0.70
-SEND_MS = 50
 MAX_OBJ = 5
 MODEL = '/sd/yolo3_iou_smartcar_final_with_post_processing.tflite'
-LOG_PATH = '/sd/cam_log.txt'
-LOG_MAX_KB = 1024*8
 _CHUNK = 60
 _CHUNK_MS = 2
-
-# =============================================================================
-#                         摄像头日志（写入 /sd/cam_log.txt）
-# =============================================================================
-
-_log_buf = ''
-
-def cam_log(msg):
-  global _log_buf
-  line = "[CAM] %s" % msg
-  print(line)
-  _log_buf += line + '\n'
-  if len(_log_buf) >= 1024:
-    _cam_log_flush()
-
-def _cam_log_flush():
-  global _log_buf
-  if not _log_buf:
-    return
-  try:
-    with open(LOG_PATH, 'a') as f:
-      f.write(_log_buf)
-    _log_buf = ''
-    st = os.stat(LOG_PATH)
-    if st[6] > LOG_MAX_KB * 1024:
-      try:
-        os.remove(LOG_PATH)
-      except Exception:
-        pass
-  except Exception:
-    pass
 
 
 def _label_to_cls(label):
@@ -112,9 +72,13 @@ def unescape(data):
 
 
 def write_chunked(uart, data):
-  for i in range(0, len(data), _CHUNK):
+  n = len(data)
+  if n <= _CHUNK:
+    uart.write(data)
+    return
+  for i in range(0, n, _CHUNK):
     uart.write(data[i:i + _CHUNK])
-    if i + _CHUNK < len(data):
+    if i + _CHUNK < n:
       time.sleep_ms(_CHUNK_MS)
 
 
@@ -191,24 +155,24 @@ def encode_detections(objects):
 
 
 def main():
-  cam_log("Init...")
+  print("[CAM] Init...")
 
   # === Sensor + UART 一次性初始化 ===
   try:
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
     sensor.set_framesize(sensor.QVGA)
-    cam_log("Sensor config OK")
+    print("[CAM] Sensor config OK")
   except Exception as e:
-    cam_log("Sensor config FAIL: %s" % e)
+    print("[CAM] Sensor config FAIL: %s" % e)
 
   uart = None
   while uart is None:
     try:
       uart = UART(UART_ID, baudrate=BAUD)
-      cam_log("UART OK")
+      print("[CAM] UART OK")
     except Exception as e:
-      cam_log("UART FAIL: %s — retry in 1s" % e)
+      print("[CAM] UART FAIL: %s — retry in 1s" % e)
       time.sleep(1)
 
   while uart.any():
@@ -219,19 +183,18 @@ def main():
   while net is None:
     try:
       net = tf.load(MODEL)
-      cam_log("Model OK")
+      print("[CAM] Model OK")
       img = sensor.snapshot()
-      cam_log("Snapshot OK {}x{}".format(img.width(), img.height()))
+      print("[CAM] Snapshot OK {}x{}".format(img.width(), img.height()))
     except Exception as e:
-      cam_log("Self-test FAIL: %s — retry in 1s" % e)
+      print("[CAM] Self-test FAIL: %s — retry in 1s" % e)
       time.sleep(1)
 
   status = b"200"
-  _cam_log_flush()
 
   # === 通信循环 ===
   while True:
-    cam_log("Wait CMD 0x01...")
+    print("[CAM] Wait CMD 0x01...")
     while True:
       cmd, _ = recv_frame(uart, timeout_ms=100)
       if cmd == 0x01:
@@ -240,7 +203,7 @@ def main():
       gc.collect()
 
     send_frame(uart, 0x02, status)
-    cam_log("Sent 0x02: " + status.decode('utf-8'))
+    print("[CAM] Sent 0x02: " + status.decode('utf-8'))
 
     # 等 0x03（开始检测）
     while True:
@@ -248,84 +211,65 @@ def main():
       if cmd == 0x01:
         send_frame(uart, 0x02, status)
       elif cmd == 0x03:
-        cam_log("Detection start")
-        _cam_log_flush()
+        print("[CAM] Detection start")
         break
       time.sleep_ms(10)
       gc.collect()
 
-    last_send_ms = 0
     last_gc_ms = time.ticks_ms()
 
     # === 检测循环 ===
     while True:
       now = time.ticks_ms()
-      cmd, _ = recv_frame(uart, timeout_ms=1)
-      if cmd == 0x01:
-        cam_log("Re-handshake")
-        send_frame(uart, 0x02, status)
-        t_rehs = time.ticks_ms()
-        timed_out = False
-        while not timed_out:
-          cmd2, _ = recv_frame(uart, timeout_ms=100)
-          if cmd2 == 0x01:
-            send_frame(uart, 0x02, status)
-          elif cmd2 == 0x03:
-            cam_log("Re-handshake done")
+      # 仅有数据时查重握手，避免每帧空等
+      if uart.any() >= 4:
+        cmd, _ = recv_frame(uart, timeout_ms=1)
+        if cmd == 0x01:
+          print("[CAM] Re-handshake")
+          send_frame(uart, 0x02, status)
+          t_rehs = time.ticks_ms()
+          timed_out = False
+          while not timed_out:
+            cmd2, _ = recv_frame(uart, timeout_ms=100)
+            if cmd2 == 0x01:
+              send_frame(uart, 0x02, status)
+            elif cmd2 == 0x03:
+              print("[CAM] Re-handshake done")
+              break
+            if time.ticks_diff(time.ticks_ms(), t_rehs) > 5000:
+              print("[CAM] Re-handshake timeout")
+              timed_out = True
+            time.sleep_ms(10)
+          if timed_out:
             break
-          if time.ticks_diff(time.ticks_ms(), t_rehs) > 5000:
-            cam_log("Re-handshake timeout")
-            timed_out = True
-          time.sleep_ms(10)
-        if timed_out:
-          break
-        while uart.any():
-          uart.read(uart.any())
-        last_send_ms = time.ticks_ms()
-        last_gc_ms = last_send_ms
-        continue
+          while uart.any():
+            uart.read(uart.any())
+          last_gc_ms = time.ticks_ms()
+          continue
 
-      if time.ticks_diff(now, last_send_ms) >= SEND_MS:
-        img = sensor.snapshot()
-        # ROI: 去除上方 n% 的区域
-        roi = img.copy(0.6, 1)
-        objects = []
-        if net is not None:
-          try:
-            for obj in tf.detect(net, roi):
-              x1, y1, x2, y2, label, score = obj
-              score = float(score)
-              if score <= CONF_MIN:
-                continue
-              cls_id = _label_to_cls(label)
-              if cls_id is None:
-                continue
-              objects.append((cls_id, score, float(x1), float(y1), float(x2), float(y2)))
-          except Exception as e:
-            cam_log("tf err: %s" % e)
-            objects = []
-        if len(objects) > MAX_OBJ:
-          objects.sort(key=lambda o: -o[1])
-          objects = objects[:MAX_OBJ]
+      img = sensor.snapshot()
+      objects = []
+      if net is not None:
+        try:
+          for obj in tf.detect(net, img):
+            x1, y1, x2, y2, label, score = obj
+            score = float(score)
+            if score <= CONF_MIN:
+              continue
+            cls_id = _label_to_cls(label)
+            if cls_id is None:
+              continue
+            objects.append((cls_id, score, float(x1), float(y1), float(x2), float(y2)))
+        except Exception as e:
+          print("[CAM] tf err: %s" % e)
+          objects = []
+      if len(objects) > MAX_OBJ:
+        objects.sort(key=lambda o: -o[1])
+        objects = objects[:MAX_OBJ]
 
-        # 画面标注 — 调试用（不影响 UART 发送）
-        # try:
-        #   W, H = img.width(), img.height()
-        #   for cls_id, score, x1, y1, x2, y2 in objects:
-        #     px = int(x1 * W)
-        #     py = int(y1 * H)
-        #     pw = int((x2 - x1) * W)
-        #     ph = int((y2 - y1) * H)
-        #     img.draw_rectangle((px, py, pw, ph), thickness=2)
-        #     label = CLASS_NAMES[cls_id] + ' ' + str(int(score * 100)) + '%'
-        #     img.draw_string(px + 2, max(0, py - 12), label)
-        # except Exception as e:
-        #   cam_log("draw err: %s" % e)
+      send_frame(uart, 0x10, encode_detections(objects))
 
-        if send_frame(uart, 0x10, encode_detections(objects)):
-          last_send_ms = now
-
-      if time.ticks_diff(now, last_gc_ms) >= 3000:
+      if time.ticks_diff(now, last_gc_ms) >= 5000:
         last_gc_ms = now
         gc.collect()
 

@@ -236,12 +236,13 @@
 ### 主车比赛流程
 
 ```
-LEAVE → SEARCH → TRACK → [FACE → FINAL_APPROACH] → PUSH
-      → (黄线) BACKOFF → 多件则 SEARCH / 满 N 则 HOME → DONE
+LEAVE → HUNT → ALIGN → PUSH
+      → (黄线) BACKOFF → 多件则 HUNT / 满 N 则 HOME → DONE
 ```
 
-- **单一状态机**：搜/跟/推/回库均在 Match；全程 `owner=MATCH` 写电机（无独立 Robot FSM）。
-- **决赛对位 FACE**：到球前**绕车头前方轴**转到 `场心+偏角`（满额约 M1/M2=20、M3=80），同时保球居中、径向保距；对齐后 FINAL/PUSH。
+- **单一状态机**：搜/跟/对位/推/回库均在 Match；全程 `owner=MATCH` 写电机。
+- **HUNT**：搜+跟一体；丢目标就地反转，不单独 SEARCH 阶段。
+- **ALIGN**：绕车头前方轴转到 `场心+偏角`，yaw+cx 齐后前进贴接触再 PUSH；丢目标先等/反转找，超时才回 HUNT。
 - **黄线**：TCS3472（物品出线计分 + 场锁 BACKOFF）。
 - **P1**：单件推过黄线（已通路径）。
 - **P2 多件 / P3 回库**：流程已接好，依赖实车验收。

@@ -10,15 +10,53 @@ main.py — 纯比赛固件（无 Menu / 无 LCD）
 from machine import Pin, UART
 from time import sleep_ms, ticks_ms, ticks_diff
 import gc
-from log import info, setup as log_setup
+from log import info
 
 LED = Pin('C4', Pin.OUT, pull=Pin.PULL_UP_47K, value=True)
 C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
 
 
+# 主循环 GC：低水位触发 + 回差/冷却，避免空转收和连收堵主循环
+_GC_LOW = 8192     # 低于此考虑回收
+_GC_OK = 24576     # 回差：曾低于 LOW 并回收后，须先回到此以上才再次常规触发
+_GC_CRIT = 3072    # 危急：无视冷却/回差，立刻收
+_GC_COOL_MS = 200  # 两次常规 collect 最短间隔
+
+_gc_last_ms = 0
+_gc_need_ok = False  # True=刚收过，等 free 回到 _GC_OK
+
+
 def _mem(tag):
+  """启动/阶段点强制回收并打点（仅初始化路径调用）。"""
+  global _gc_last_ms, _gc_need_ok
   gc.collect()
+  _gc_last_ms = ticks_ms()
+  _gc_need_ok = False
   info("MEM", "%s free=%d" % (tag, gc.mem_free()))
+
+
+def _gc_maybe():
+  """运行期回收：稳为主，危急才连收。"""
+  global _gc_last_ms, _gc_need_ok
+  free = gc.mem_free()
+  if free >= _GC_OK:
+    _gc_need_ok = False
+  if free >= _GC_LOW:
+    return False
+  now = ticks_ms()
+  crit = free < _GC_CRIT
+  if not crit:
+    if _gc_need_ok:
+      return False
+    if ticks_diff(now, _gc_last_ms) < _GC_COOL_MS:
+      return False
+  gc.collect()
+  _gc_last_ms = now
+  free2 = gc.mem_free()
+  _gc_need_ok = free2 < _GC_OK
+  if free2 < _GC_LOW:
+    info("MEM", "WARN after collect %d→%d" % (free, free2))
+  return True
 
 
 # =============================================================================
@@ -32,7 +70,6 @@ arbiter = MotorArbiter(motors)
 info("MAIN", "Config...")
 from config import config as cfg, load_config
 load_config()
-log_setup(cfg.debug_output)
 
 # —— 提前 import 大模块（分文件 + 分步，压单文件编译峰值 OOM） ——
 info("MAIN", "Match import...")
@@ -83,7 +120,7 @@ def _on_tick_imu(_):
 
 
 def _on_tick_tcs(_):
-  """100Hz — TCS 黄线 + 场锁 BACKOFF（仅比赛期间运行）"""
+  """50Hz — TCS 黄线 + 场锁急停标记（BACKOFF 在主循环）"""
   global _tcs_on_line
   try:
     if _tcs_ready:
@@ -102,7 +139,7 @@ tkr_imu.start(5)  # 200Hz
 
 tkr_tcs = ticker(2)
 tkr_tcs.callback(_on_tick_tcs)
-# 暂不启动 — 进入比赛阶段后以 100Hz 启动
+# 暂不启动 — 进入比赛阶段后以 50Hz 启动
 
 info("MAIN", "Camera UART5...")
 from camera import CameraRx
@@ -116,7 +153,7 @@ tcs.yellow_r_min = float(cfg.tcs_r_min)
 tcs.yellow_g_min = float(cfg.tcs_g_min)
 tcs.yellow_b_max = float(cfg.tcs_b_max)
 tcs.yellow_c_min = int(cfg.tcs_c_min)
-_tcs_ready = True  # 至此 TCS 已在 ISR 中轮询, _tcs_on_line 每 5ms 更新
+_tcs_ready = True  # 比赛阶段 50Hz 轮询；积分~154ms，50Hz 足够过 5cm 黄线
 _mem("tcs")
 
 # —— 实例化（所有硬件依赖已就绪） ——
@@ -184,7 +221,7 @@ def _build_sensors():
     _y2 = 0.0
     _last_frame_ms = 0
 
-  # ★ TCS 已由 100Hz ISR 轮询, 此处直接读电平
+  # ★ TCS 已由 50Hz ISR 轮询, 此处直接读电平
   on_line = _tcs_on_line
 
   return {
@@ -252,7 +289,7 @@ elif not _imu_ok:
   info("BOOT", "======== IMU FAILED — check sensor ========")
 if not _cam_ok:
   info("BOOT", "======== CAMERA FAILED — start locked ========")
-_mem("loop")
+_mem("boot-done")
 
 # =============================================================================
 #                              主循环
@@ -265,7 +302,6 @@ _last_ms = ticks_ms()
 _last_stat_ms = ticks_ms()
 _last_cal_ms = ticks_ms()
 _loop = 0
-_gc_n = 0
 _last_match_phase = ""
 _cam_retry_ms = 0
 
@@ -300,7 +336,7 @@ while True:
           info("MATCH", "Camera not ready — cannot start")
         elif match.start():
           phase = "RUN"
-          tkr_tcs.start(10)  # 100Hz TCS + 场锁
+          tkr_tcs.start(20)  # 50Hz TCS + 场锁
           info("MATCH", "GO! scored reset")
         else:
           info("MATCH", "start refused phase=%s" % match.phase)
@@ -318,7 +354,7 @@ while True:
   # —— 业务 ——
   sensors = _build_sensors()
   imu._motor_on = arbiter.motors_active
-  # BACKOFF 时 match.tick 仅 flush；ISR 独占电机写
+  # 黄线急停在 ISR；BACKOFF/得分/回中前进在 match.tick 主循环
   match.tick(dt, sensors)
 
   if phase == "RUN":
@@ -359,7 +395,7 @@ while True:
     info("STAT", "%s stage=%s match=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
      phase, match.stage, match.status_text, yaw, ht, yl, gc.mem_free()))
 
-  if cfg.debug_output and ticks_diff(now, _last_cal_ms) >= 500:
+  if ticks_diff(now, _last_cal_ms) >= 500:  # CAL 日志频率（原 cfg.debug_output 守卫已删：构建开关由 build_flash 整段剥 info 决定）
     _last_cal_ms = now
     target = sensors.get("target")
     mx, my, mz = imu.mag_data
@@ -380,11 +416,12 @@ while True:
       nav[0], nav[1] or "-", nav[2], nav[3], nav[4], nav[5], nav[6],
       nav[7], nav[8], nav[9], d0, d1, d2, arbiter.owner or "-",
       nav[10], nav[11]))
-    tcs.debug_print()
+    # 仅黄线上打 TCS 日志（用 ISR 缓存，不额外读 I2C）
+    if sensors.get("tcs_on_line"):
+      r, g, b, c, rn, gn, bn, ok = tcs.last_rgb()
+      info("TCS", "ON R=%d G=%d B=%d C=%d rn=%.2f gn=%.2f bn=%.2f ok=%s" % (
+        r, g, b, c, rn, gn, bn, ok))
 
-  _gc_n += 1
-  if _gc_n >= 100:
-    _gc_n = 0
-    _mem("loop")
+  _gc_maybe()
 
   sleep_ms(5)

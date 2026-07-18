@@ -52,8 +52,8 @@ class Config:
     self.match_mode = "final"        # "pre"=预赛直推; "final"=决赛绕行
     self.start_layout = 0           # 0=底边中; 1=底边中; 2=左下; 3=右下; 4=左边中
     self.push_hdg_ref = 0.0         # 朝场心 H_ref
-    self.hdg_off = [90.0, 0.0, -90.0]  # 按 cls_id: 沙袋/网球/熊
-    self.match_order = [CLS_UP, CLS_LEFT, CLS_RIGHT]  # SEARCH 优先序
+    self.hdg_off = [0.0, -90.0, 180.0]  # 按 cls_id: 沙袋/网球/熊（相对场心）
+    self.match_order = [CLS_UP, CLS_LEFT, CLS_RIGHT]  # HUNT 优先序
     self.strict_target = False
     self.single_target_class = CLS_UP
     self.drive_duty = 15.0
@@ -70,7 +70,7 @@ class Config:
     self.orbit_range_tol_pct = 7.0
     self.orbit_confirm_frames = 4
     self.orbit_lost_frames = 6
-    # FACE 绕前方轴：spin+slip 同号 → 满额约 M1/M2=20、M3=80
+    # FACE/ALIGN 绕前方轴：spin+slip 同号 → 满额约 M1/M2 慢、M3 快
     self.orbit_front_spin = 40.0
     self.orbit_front_slip = 60.0
     self.orbit_front_flip = False
@@ -83,7 +83,7 @@ class Config:
     self.push_cx_left_min = 8.0    # cx 下限（偏左更宽容）
     self.push_cx_right_max = 78.0  # cx 上限（偏右更严）
     self.push_correct_duty = 10.0  # 过偏慢纠前向占空比
-    self.push_lost_blind_ms = 600  # 推进超过此时长后忽略丢失（贴车头遮挡）
+    self.push_lost_blind_ms = 600  # 盲区后仅贴头遮挡可继续推；划走丢失→reseek
     self.backoff_retreat_min_ms = 450  # BACKOFF 后退最少保持时间（防 on_line 抖动）
     self.backoff_spin_deg = 170.0   # BACKOFF 开环自旋目标角度（°）
     self.recover_backoff_ms = 500      # BACKOFF 后退最大超时
@@ -99,9 +99,11 @@ class Config:
     self.tcs_c_min = 800            # 黄线最低亮度
 
     # ——— 搜索 / 接近超时 ———
-    self.pick_timeout_ms = 20000    # SEARCH 超时
-    self.pick_class_timeout_ms = 8000  # 队首类无结果→移到队尾
-    self.approach_timeout_ms = 15000  # TRACK 超时
+    self.pick_timeout_ms = 20000    # HUNT 超时
+    self.pick_class_timeout_ms = 8000  # 兼容旧配置；换类已改帧计数
+    self.pick_class_frames = 6      # 队首连续 N 帧无物→队尾；见某物→置队首
+    self.center_fwd_ms = 4000       # BACKOFF 后前进寻物超时→SPIN
+    self.approach_timeout_ms = 15000  # 旧 TRACK；HUNT 用 pick_timeout
     self.home_backoff_ms = 1500     # HOME 离线倒车超时
 
     # ——— IMU 融合 ———
@@ -207,6 +209,8 @@ class Config:
       # 超时
       "搜索超时": int(self.pick_timeout_ms),
       "队首超时": int(self.pick_class_timeout_ms),
+      "队首换类帧数": int(self.pick_class_frames),
+      "回中前进超时": int(self.center_fwd_ms),
       "接近超时": int(self.approach_timeout_ms),
       "离线超时": int(self.home_backoff_ms),
       # IMU
@@ -375,6 +379,8 @@ class Config:
     # 超时
     elif k == "搜索超时": self.pick_timeout_ms = int(v)
     elif k == "队首超时": self.pick_class_timeout_ms = int(v)
+    elif k == "队首换类帧数": self.pick_class_frames = int(v)
+    elif k == "回中前进超时": self.center_fwd_ms = int(v)
     elif k == "接近超时": self.approach_timeout_ms = int(v)
     elif k == "离线超时": self.home_backoff_ms = int(v)
     # IMU

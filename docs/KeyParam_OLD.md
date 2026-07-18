@@ -169,7 +169,7 @@ ORBIT 首次验收标准：
 在仓库根目录执行：
 
 ```powershell
-c:\ProgramFiles\Python\Python311\python.exe tools\build_flash.py
+c:\ProgramFiles\Python\Python311\python.exe CODE\build_flash.py
 c:\ProgramFiles\Python\Python311\python.exe tools\verify_firmware.py
 ```
 

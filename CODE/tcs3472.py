@@ -31,8 +31,9 @@ class BitBangI2C:
   """GPIO bit-bang I2C，仅提供 writeto/readfrom_mem。"""
 
   def __init__(self, scl_pin, sda_pin, freq=100000):
-    self._sc = Pin(scl_pin, Pin.OPEN_DRAIN)
-    self._sd = Pin(sda_pin, Pin.OPEN_DRAIN)
+    # 内部上拉 47KΩ (弱, 抗干扰弱于外部 4.7KΩ, 但比浮空强 10 倍)
+    self._sc = Pin(scl_pin, Pin.OPEN_DRAIN, pull=Pin.PULL_UP_47K)
+    self._sd = Pin(sda_pin, Pin.OPEN_DRAIN, pull=Pin.PULL_UP_47K)
     self._us = max(1, 500000 // freq)
     self._sc(1); self._sd(1)
     time.sleep_us(10)
@@ -234,19 +235,14 @@ class TCS3472:
   def yellow_cross_count(self):
     return self._yellow_count
 
-  def debug_print(self):
-    r, g, b, c = self.read_raw()
+  def last_rgb(self):
+    """返回上次 ISR 读到的 (R,G,B,C,rn,gn,bn,ok)，不再读 I2C。"""
+    r, g, b, c = self._last_rgb
     if c > 0:
       rn, gn, bn = r / c, g / c, b / c
     else:
       rn = gn = bn = 0.0
-    is_y = (self._read_ok and c >= self.yellow_c_min and
-            rn >= self.yellow_r_min and
-            gn >= self.yellow_g_min and
-            bn <= self.yellow_b_max)
-    info("TCS", "R=%d G=%d B=%d C=%d | rn=%.2f gn=%.2f bn=%.2f yellow=%s" % (
-      r, g, b, c, rn, gn, bn, is_y))
-    return (r, g, b, c, is_y)
+    return (r, g, b, c, rn, gn, bn, self._read_ok)
 
   def _on_i2c_error(self):
     if self._gave_up:

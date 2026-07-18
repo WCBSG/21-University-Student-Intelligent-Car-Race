@@ -1,20 +1,14 @@
 """
-log.py — 统一日志接口
-  info(tag, msg)   → [TAG] msg
+log.py — 统一日志接口（仅写文件，不打串口）
+  info(tag, msg)   → [t+sss.ss] [TAG] msg → /flash/log.txt
   setup(enabled)   → 开关文件写入
 """
 import os
+from time import ticks_ms
 
-_print = print           # 保存原始 print（在任何 override 之前）
-_enabled = False
 _buf = ''
 _path = '/flash/log.txt'
 MAX_KB = 6144  # 6MB
-
-
-def setup(enabled):
-  global _enabled
-  _enabled = bool(enabled)
 
 
 def _flush():
@@ -41,16 +35,13 @@ def _flush():
 
 def _write(line):
   global _buf
-  if not _enabled:
-    return
   _buf += line
   if '\n' in _buf:
     _flush()
 
 
 def info(tag, msg):
-  """带标签日志: [TAG] msg"""
-  line = "[%s] %s" % (tag, msg)
-  _print(line)
+  """带标签日志: [t+sss.ss] [TAG] msg → 文件"""
+  line = "[%6.2f] [%s] %s" % (ticks_ms() / 1000, tag, msg)
   _write(line + '\n')
 
