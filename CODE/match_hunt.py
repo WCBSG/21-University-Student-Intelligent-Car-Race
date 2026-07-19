@@ -130,8 +130,8 @@ class MatchHunt:
   def _tick_leave(self, sensors):
     now = ticks_ms()
     target = sensors.get("target") if sensors else None
-    # 看到目标 → 锁定并提前退出
-    if self._seen_target(sensors) and target is not None:
+    # 看到目标 → 锁定并提前退出（仅比赛三类，忽略 XB/brick）
+    if self._seen_target(sensors) and target is not None and int(target[0]) in (0, 1, 2):
       self._lock_active_class(target[0])
       self._cache_backoff_duties()
       self._arm_boundary_when_clear()
@@ -475,7 +475,9 @@ class MatchHunt:
     if not yaw_ok and self._was_yaw_ok:
       yaw_ok = abs(yaw_err) <= yaw_tol * 1.5
     self._was_yaw_ok = yaw_ok
-    cx_ok = abs(cx_off) <= cx_tol
+    # 目标近接触时放宽 cx 容差（贴脸无法精确居中对齐）
+    near_contact = y2 >= float(c.tracking_contact_bottom_pct)
+    cx_ok = abs(cx_off) <= (cx_tol * 2.0 if near_contact else cx_tol)
     stage_y2 = float(c.tracking_stage_bottom_pct)
     radial = (stage_y2 - y2) * float(c.orbit_radial_kp)
     radial = self._clamp(radial, -float(c.orbit_radial_max), float(c.orbit_radial_max))
@@ -483,14 +485,14 @@ class MatchHunt:
     # TURN：航向对→平移居中+前进，接触→PUSH
     if yaw_ok:
       lateral = self._clamp(
-        (50.0 - cx) / 50.0 * lat_spd, -lat_spd, lat_spd)
+        (cx - 50.0) / 50.0 * lat_spd, -lat_spd, lat_spd)
       dt = self._control_dt()
       rot = (float(c.yaw_actuation_sign) *
              self._hdg_pid.update(yaw_err, dt, yaw_rate))
-      # cx 偏离时减速前推防冲过头
+      # cx 偏离时减速前推（底速 20% 防合成后个别轮 < MIN_DUTY 卡死）
       cx_abs = abs(cx - 50.0)
-      approach = max(radial, 10.0) * max(0.3, 1.0 - cx_abs / 50.0)
-      self._write_vector(approach, lateral, rot)
+      approach = max(radial, 20.0) * max(0.5, 1.0 - cx_abs / 50.0)
+      self._write_vector(approach, lateral, rot, use_min_duty=True)
       ready = cx_ok and y2 >= contact
       if sensors and sensors.get("new_frame"):
         self._orbit_confirm = self._orbit_confirm + 1 if ready else 0
@@ -515,12 +517,15 @@ class MatchHunt:
     slip = rot_n * float(c.orbit_front_slip)
     if bool(c.orbit_front_flip): slip = -slip
     lat_extra = self._clamp(
-      (50.0 - cx) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
-    # 绕行时用 move(90°) 左移, 不前推
+      (cx - 50.0) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
+    # 距离修正：目标太近(y2大)→后退远离，radial 为负即后退
     side_total = slip + lat_extra
+    # 径向保距：目标太近(y2大)→radial负→后退, 目标远→前推靠近
+    fwd_duty = radial if radial < 0 else max(0.0, radial * 0.5)
     side = MotionControl.move(side_total, 90.0) if abs(side_total) > 1e-6 else (0.0, 0.0, 0.0)
-    duties = [self._clamp(side[i] + spin, -100.0, 100.0) for i in range(3)]
-    self._set_command(0.0, side_total, spin)
+    fwd = MotionControl.move_forward(fwd_duty) if abs(fwd_duty) > 1e-6 else (0.0, 0.0, 0.0)
+    duties = [self._clamp(fwd[i] + side[i] + spin, -100.0, 100.0) for i in range(3)]
+    self._set_command(fwd_duty, side_total, spin)
     self._arb.write(self.OWNER, duties, False)
     if sensors and sensors.get("new_frame"):
       self._orbit_confirm = 0
@@ -602,4 +607,17 @@ class MatchHunt:
     if self._sub == "CORRECT":
       self._write_push_correct(sensors)
       return
+
+    # ★ brick 挡路: 降速 + 根据目标方向侧移绕开
+    if sensors and sensors.get("brick_blocking"):
+      t = sensors.get("target")
+      evade_dir = 1.0 if (t is not None and t[6] < 50.0) else -1.0
+      lateral = evade_dir * 50.0  # >0右移 <0左移
+      self._sub = "EVADE"
+      self._write_vector(25.0, lateral, 0.0)
+      return
+    elif self._sub == "EVADE":
+      self._sub = "DRIVE"
+      self._hdg_pid.reset()
+      info("MATCH", "PUSH EVADE complete → DRIVE")
     self._write_move_locked(float(self._cfg.push_duty), self._hold_yaw)

@@ -229,7 +229,7 @@ def tick():
 
   # ── TURN ──
   if yaw_ok:
-    lateral = _clamp((50.0 - cx) / 50.0 * lat_spd, -lat_spd, lat_spd)
+    lateral = _clamp((cx - 50.0) / 50.0 * lat_spd, -lat_spd, lat_spd)
     dt = _control_dt(); rot = _yaw_actuation_sign * _hdg_pid.update(yaw_err, dt)
     # 侧移居中时减速前推, 避免冲过头
     cx_abs = abs(cx - 50.0)
@@ -253,7 +253,7 @@ def tick():
   rot_n = _clamp(rot_n, -1.0, 1.0)
   spin = rot_n * _orbit_front_spin; slip = rot_n * _orbit_front_slip
   if _orbit_front_flip: slip = -slip
-  lat_extra = _clamp((50.0 - cx) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
+  lat_extra = _clamp((cx - 50.0) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
   side_total = slip + lat_extra
   side = MotionControl.move(side_total, 90.0) if abs(side_total) > 1e-6 else (0.0, 0.0, 0.0)
   # 绕行时不前推，保持距离；由 yaw_ok 路径的 radial 负责保距

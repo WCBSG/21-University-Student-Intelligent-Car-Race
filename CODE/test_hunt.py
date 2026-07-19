@@ -298,19 +298,25 @@ def run(hz=20):
   _run_loop(hz)
 
 def cam_test(sec=10):
-  """摄像头检测 10s"""
+  """摄像头检测 10s — 打印原始帧 + 全部检测字段"""
   if _cam is None or not _cam.is_ready: print("[cam] 未就绪"); return
   print("[cam] %ds 检测..." % sec)
-  t0 = ticks_ms(); n = 0
+  t0 = ticks_ms(); n = 0; raw_n = 0
   try:
     while ticks_diff(ticks_ms(), t0) < sec * 1000:
       frame = _cam.poll()
-      if frame is not None and frame.has_target:
-        n += 1
-        for d in frame.detections:
-          print("  cls=%d conf=%d cx=%.0f%% y2=%.0f%%" % (int(d[0]), int(d[1]), d[6], d[9]))
+      if frame is not None:
+        raw_n += 1
+        if frame.has_target:
+          n += 1
+          for d in frame.detections:
+            # d = [cls, conf, x1%, y1%, w%, h%, cx%, cy%, area%, y2%]
+            print("  cls=%d conf=%d x1=%.0f y1=%.0f w=%.0f h=%.0f cx=%.0f cy=%.0f area=%.0f y2=%.0f" % (
+              int(d[0]), int(d[1]), d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9]))
+        else:
+          print("  [no target] num=%d" % frame.num)
       sleep_ms(50)
   except KeyboardInterrupt: pass
-  print("[cam] done: %d frames with target" % n)
+  print("[cam] done: %d/%d frames with target" % (n, raw_n))
 
 init()

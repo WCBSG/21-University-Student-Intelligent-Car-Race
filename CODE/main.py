@@ -163,13 +163,14 @@ def _build_sensors():
       new_frame = True
       raw_n = frame.num
       _has_target = frame.has_target
+      raw_dets = frame.detections
       if _has_target:
         if match.is_running:
           _target = select_target(
-            frame.detections, cfg,
+            raw_dets, cfg,
             allow=match.match_allow, target_class=match.filter_class)
         else:
-          _target = select_target(frame.detections, cfg)
+          _target = select_target(raw_dets, cfg)
         _has_target = _target is not None
         if _has_target:
           _y2 = _target[9]
@@ -179,7 +180,7 @@ def _build_sensors():
           now = ticks_ms()
           if raw_n > 0 and ticks_diff(now, _filt_ms) > 1000:
             _filt_ms = now
-            d0 = frame.detections[0]
+            d0 = raw_dets[0]
             want = match.filter_class if match.is_running else cfg.tracking_target_class
             allow = match.match_allow if match.is_running else None
             info("CAM", "filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
@@ -187,18 +188,32 @@ def _build_sensors():
       else:
         _target = None
         _y2 = 0.0
+        raw_dets = []
+
+      # ★ brick 挡路检测: 同方向 + 更近（y2更大）→ blocking
+      _brick_blocking = False
+      if match.is_running and _target is not None and raw_dets:
+        tcx = _target[6]
+        ty2 = _target[9]
+        for d in raw_dets:
+          if int(d[0]) == cfg.CLS_BRICK:
+            if abs(d[6] - tcx) < 25.0 and d[9] > ty2:
+              _brick_blocking = True
+              break
     else:
       # ★ 基于时间戳超时清目标: 300ms 无帧 → 清 (适应 10FPS 低帧率)
       if _last_frame_ms and ticks_diff(ticks_ms(), _last_frame_ms) > 300:
         _has_target = False
         _target = None
         _y2 = 0.0
+      _brick_blocking = False
     cam_timeout = camera.timed_out
   else:
     _has_target = False
     _target = None
     _y2 = 0.0
     _last_frame_ms = 0
+    _brick_blocking = False
 
   # ★ TCS 已由 50Hz ISR 轮询, 此处直接读电平
   on_line = _tcs_on_line
@@ -210,6 +225,7 @@ def _build_sensors():
     "y2": _y2,
     "cam_timeout": cam_timeout,
     "tcs_on_line": on_line,
+    "brick_blocking": _brick_blocking,
   }
 
 
@@ -366,40 +382,26 @@ while True:
     # IDLE 长亮：等待发车
     LED.low()
 
-  if ticks_diff(now, _last_stat_ms) >= 2000:
-    _last_stat_ms = now
-    yaw = imu.get_yaw()
-    ht = "Y" if sensors.get("has_target") else "N"
-    yl = "Y" if sensors.get("tcs_on_line") else "N"
-    info("STAT", "%s stage=%s match=%s yaw=%+.1f tgt=%s line=%s free=%d" % (
-     phase, match.stage, match.status_text, yaw, ht, yl, gc.mem_free()))
-
-  if ticks_diff(now, _last_cal_ms) >= 500:  # CAL 日志频率（原 cfg.debug_output 守卫已删：构建开关由 build_flash 整段剥 info 决定）
+  # ── 精简日志: NAV(500ms) + STAT(2s) ──
+  if ticks_diff(now, _last_cal_ms) >= 500:
     _last_cal_ms = now
-    target = sensors.get("target")
-    mx, my, mz = imu.mag_data
-    yaw, src = imu.get_fused_yaw(motor_on=arbiter.motors_active, apply=False)
-    mrel = imu.get_mag_rel()
-    mrel_s = "n/a" if mrel is None else "%+.1f" % mrel
-    m_on = "M" if arbiter.motors_active else "."
-    if target is None:
-      info("CAL", "yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s target=NONE" % (
-        yaw, mrel_s, mx, my, mz, src, m_on))
-    else:
-      info("CAL", "yaw=%+.1f mrel=%s mag=(%d,%d,%d) src=%s %s cls=%d score=%d cx=%.1f y2=%.1f area=%.1f" % (
-        yaw, mrel_s, mx, my, mz, src, m_on, int(target[0]), int(target[1]),
-        float(target[6]), float(target[9]), float(target[8])))
     nav = match.navigation_snapshot(sensors)
     d0, d1, d2 = arbiter.duties
-    info("NAV", "phase=%s/%s yaw=%+.1f tgt=%+.1f err=%+.1f cx=%.1f y2=%.1f cmd=(%+.1f,%+.1f,%+.1f) pwm=(%+.1f,%+.1f,%+.1f) owner=%s conf=%d lost=%d" % (
-      nav[0], nav[1] or "-", nav[2], nav[3], nav[4], nav[5], nav[6],
+    t = sensors.get("target")
+    cx = "%.0f" % t[6] if t else "-"
+    y2 = "%.0f" % t[9] if t else "-"
+    info("NAV", "%s/%s y=%+.0f e=%+.0f cx=%s y2=%s | %+.0f,%+.0f,%+.0f | %+.0f,%+.0f,%+.0f %s c=%d l=%d bk=%d" % (
+      nav[0], nav[1] or "-", nav[2], nav[4], cx, y2,
       nav[7], nav[8], nav[9], d0, d1, d2, arbiter.owner or "-",
-      nav[10], nav[11]))
-    # 仅黄线上打 TCS 日志（用 ISR 缓存，不额外读 I2C）
-    if sensors.get("tcs_on_line"):
-      r, g, b, c, rn, gn, bn, ok = tcs.last_rgb()
-      info("TCS", "ON R=%d G=%d B=%d C=%d rn=%.2f gn=%.2f bn=%.2f ok=%s" % (
-        r, g, b, c, rn, gn, bn, ok))
+      nav[10], nav[11], int(sensors.get("brick_blocking", False))))
+
+  if ticks_diff(now, _last_stat_ms) >= 3000:
+    _last_stat_ms = now
+    info("MEM", "free=%d" % gc.mem_free())
+
+  if sensors.get("tcs_on_line"):
+    r, g, b, c, rn, gn, bn, ok = tcs.last_rgb()
+    info("TCS", "ON R=%d G=%d B=%d C=%d ok=%s" % (r, g, b, c, ok))
 
   _gc_maybe()
 

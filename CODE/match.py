@@ -302,7 +302,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._ctrl_ms = now
     return dt
 
-  def _write_vector(self, forward, lateral, rot):
+  def _write_vector(self, forward, lateral, rot, use_min_duty=False):
     """全向运动：forward=前后, lateral=左右(>0右移), rot=自旋(>0 CW)。"""
     if self._backoff_busy:
       return
@@ -313,7 +313,7 @@ class MatchRunner(MatchIsr, MatchHunt):
       for i in range(3)
     ]
     self._set_command(forward, lateral, rot)
-    self._arb.write(self.OWNER, duties, False)
+    self._arb.write(self.OWNER, duties, use_min_duty)
 
   @staticmethod
   def _clamp(v, lo, hi):
@@ -461,7 +461,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     elif sub == "BACKOFF_TURN":
       self._home_backoff_turn(now)
     elif sub == "LEG2_DRIVE":
-      self._home_leg2_drive(on_line)
+      self._home_leg2_drive(now, on_line, sensors)
     elif sub == "CROSS":
       self._home_cross(now)
 
@@ -524,17 +524,44 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._home_turn_ok = 0
       self._sub = "LEG2_DRIVE"
       self._phase_ms = now
+      self._match_allow = [int(self._cfg.CLS_XB)]  # LEG2 只追踪 XB 信标
+      self._push_last_cx = 50.0
       self._tcs.reset_crossed()
-      info("MATCH", "HOME → LEG2_DRIVE hold=%.1f" % self._hold_yaw)
+      info("MATCH", "HOME → LEG2_DRIVE hold=%.1f (XB tracking)" % self._hold_yaw)
 
-  def _home_leg2_drive(self, on_line):
+  def _home_leg2_drive(self, now, on_line, sensors):
+    """LEG2 陀螺仪航向锁 + XB 信标横向修正"""
+    target = sensors.get("target")
+    has_xb = target is not None
+
     if on_line:
+      # XB 确认：压黄线 + 信标在视野内且够近
+      xb_ok = has_xb and target[9] >= float(self._cfg.home_xb_contact_y2)
       self._hold_brake()
       self._sub = "CROSS"
-      self._phase_ms = ticks_ms()
-      info("MATCH", "HOME → CROSS")
+      self._phase_ms = now
+      if xb_ok:
+        info("MATCH", "HOME XB confirmed (y2=%.0f) → CROSS" % target[9])
+      else:
+        info("MATCH", "HOME yellow (XB miss/too far) → CROSS")
       return
-    self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
+
+    # 未压线：航向锁 + XB 横向修正
+    lateral = 0.0
+    if has_xb:
+      cx = float(target[6])
+      err_cx = cx - 50.0       # XB 偏右→正→右移
+      d_cx = cx - self._push_last_cx
+      self._push_last_cx = cx
+      kp = float(self._cfg.home_xb_lateral_kp)
+      kd = float(self._cfg.home_xb_lateral_kd)
+      lateral = self._clamp(err_cx * kp - d_cx * kd, -60.0, 60.0)
+
+    err = self._yaw_err(self._hold_yaw)
+    dt_i = self._control_dt()
+    rate = self._yaw_rate()
+    rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt_i, rate)
+    self._write_vector(float(self._cfg.drive_duty), lateral, rot)
 
   def _home_cross(self, now):
     """过线后继续前进 1 秒，防止停在线上。"""

@@ -4,12 +4,12 @@ import sensor, image, time, gc
 from machine import UART
 import tf
 
-# 0=sandbag/左 1=netball/上 2=bear/右（与 MCU config 一致）
-CLASS_NAMES = ('sandbag', 'netball', 'bear')
+# 0=沙袋 1=网球 2=熊 3=XB(信标) 4=brick(红砖 干扰物)（与 MCU config 一致）
+CLASS_NAMES = ('sandbag', 'netball', 'bear', 'XB', 'brick')
 UART_ID = 12
 BAUD = 460800
-CONF_MIN = 0.70
-MAX_OBJ = 5
+CONF_MIN = 0.50    # 降低阈值，所有检测结果发给 MCU 过滤
+MAX_OBJ = 20       # 实际上不限制，让 MCU 端按 allow 过滤
 MODEL = '/sd/yolo3_iou_smartcar_final_with_post_processing.tflite'
 _CHUNK = 60
 _CHUNK_MS = 2
@@ -270,6 +270,86 @@ def main():
       if time.ticks_diff(now, last_gc_ms) >= 5000:
         last_gc_ms = now
         gc.collect()
+
+
+def tft_test():
+  """纯模型性能测试：检测+绘制，无UART通信。
+     调用: tft_test() 或直接运行本文件时自动执行。
+  """
+  print("[TFT] Sensor init...")
+  sensor.reset()
+  sensor.set_pixformat(sensor.RGB565)
+  sensor.set_framesize(sensor.QVGA)
+  sensor.skip_frames(10)
+
+  print("[TFT] Load model...")
+  net = None
+  while net is None:
+    try:
+      net = tf.load(MODEL)
+      print("[TFT] Model OK")
+    except Exception as e:
+      print("[TFT] Model FAIL: %s — retry 1s" % e)
+      time.sleep(1)
+
+  # 测试快照验证
+  img = sensor.snapshot()
+  print("[TFT] Snapshot OK %dx%d" % (img.width(), img.height()))
+
+  print("[TFT] Detection loop — 按复位键退出")
+  fps_ms = time.ticks_ms()
+  fps_n = 0
+  fps_str = "0.0"
+
+  while True:
+    img = sensor.snapshot()
+    det_n = 0
+    raw_n = 0
+
+    for obj in tf.detect(net, img):
+      x1, y1, x2, y2, label, score = obj
+      s = float(score)
+      raw_n += 1
+
+      w = x2 - x1
+      h = y2 - y1
+      ix1 = int(x1 * img.width())
+      iy1 = int(y1 * img.height())
+      iw = int(w * img.width())
+      ih = int(h * img.height())
+
+      if s < 0.10:
+        continue
+      cls_id = _label_to_cls(label)
+      if cls_id is None:
+        continue
+      det_n += 1
+
+      if cls_id == 4:
+        color = (255, 0, 0)
+      elif cls_id == 3:
+        color = (0, 0, 255)
+      else:
+        color = (0, 255, 0)
+
+      img.draw_rectangle((ix1, iy1, iw, ih), color, 2)
+      name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else "?"
+      img.draw_string(ix1, max(0, iy1 - 14),
+                      "%s %.0f%%" % (name, s * 100),
+                      color, 1)
+
+    # 每秒串口输出一次统计
+    fps_n += 1
+    now = time.ticks_ms()
+    if time.ticks_diff(now, fps_ms) >= 1000:
+      fps_str = "%.1f" % (fps_n * 1000.0 / max(1, time.ticks_diff(now, fps_ms)))
+      print("[TFT] FPS=%s raw=%d det=%d" % (fps_str, raw_n, det_n))
+      fps_n = 0
+      fps_ms = now
+    img.draw_string(2, 2, "FPS:%s N:%d" % (fps_str, det_n),
+                    (255, 255, 255), 1)
+
+    gc.collect()
 
 
 main()

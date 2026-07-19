@@ -485,6 +485,13 @@ def main():
         return 1
 
     strip_log = args.strip_log
+    # 若未显式传 --strip-log，从 config.py 的 debug_output 读取默认值
+    if not strip_log:
+        try:
+            import config as _cfg
+            strip_log = not bool(getattr(_cfg, "debug_output", True))
+        except Exception:
+            pass
     print("src: %s" % src)
     print("dst: %s" % dst)
     print("strip_log=%s" % strip_log)
