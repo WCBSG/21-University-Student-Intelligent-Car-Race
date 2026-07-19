@@ -563,19 +563,20 @@ class MatchHunt:
     return None
 
   def _write_push_correct(self, sensors):
+    """PD侧移闭环纠偏, 减速前推, 不转车头"""
     t = sensors.get("target") if sensors else None
     if t is None:
       self._hold_brake()
       return
-    now = ticks_ms()
-    bearing = (float(t[6]) - 50.0) / 50.0
-    be_dt = ticks_diff(now, self._be_ms) / 1000.0
-    be_rate = (bearing - self._prev_be) / be_dt if 0.001 < be_dt < 0.5 else 0.0
-    self._prev_be = bearing
-    self._be_ms = now
-    rot = (float(self._cfg.tracking_bearing_actuation_sign) *
-           self._bearing_pid.update(bearing, self._control_dt(), be_rate))
-    self._write_vector(float(self._cfg.push_correct_duty), 0.0, rot)
+    cx = float(t[6])
+    err_cx = cx - 50.0  # cx>50→右偏→右移跟随
+    d_cx = cx - self._push_last_cx
+    lateral = self._clamp(err_cx * 0.6 - d_cx * 0.5, -60.0, 60.0)
+    fwd = MotionControl.move_forward(12.0)
+    side = MotionControl.move_side(lateral) if abs(lateral) > 1e-6 else (0.0, 0.0, 0.0)
+    self._set_command(12.0, lateral, 0.0)
+    self._arb.write(self.OWNER, [
+      self._clamp(fwd[i] + side[i], -100.0, 100.0) for i in range(3)])
 
   def _tick_push(self, sensors):
     now = ticks_ms()
