@@ -113,6 +113,61 @@ class MotionControl:
 
 
 # =============================================================================
+#              MotionControlOtto — HP Otto Omni3 运动学（实验分支）
+# =============================================================================
+# 公式来源: github.com/UEA-envsoft/HP-Otto-Omni3
+#   vx = -speed * sin(angle)
+#   vy =  speed * cos(angle)
+#   v1 = -vx + spin          (轮0 — 对应我们的轮序可用 _MAP 调整)
+#   v2 =  0.5*vx - 0.866*vy + spin
+#   v3 =  0.5*vx + 0.866*vy + spin
+# =============================================================================
+class MotionControlOtto:
+  """Otto 运动学：支持右绕轴转（orbit around right axis）。
+     用法同 MotionControl，move/move_forward/move_side 接口兼容。
+  """
+  # 轮序映射: Otto 公式输出的 [v0,v1,v2] → 我们的 [M0,M1,M2]
+  # 默认直接映射；跑 test 验证后调整
+  _MAP = (0, 1, 2)
+
+  # 缩放系数（Otto 公式输出可能和我们的 duty 范围不一致）
+  _SCALE = 1.0
+
+  @staticmethod
+  def move(speed, angle):
+    """全向运动。angle=0=前方, -90=右, 90=左。"""
+    s = float(speed) * MotionControlOtto._SCALE
+    rad = math.radians(float(angle))
+    vx = -s * math.sin(rad)
+    vy = s * math.cos(rad)
+    v = [vx, 0.5 * vx - 0.866 * vy, 0.5 * vx + 0.866 * vy]
+    # 轮序映射
+    m = MotionControlOtto._MAP
+    return [v[m[0]], v[m[1]], v[m[2]]]
+
+  @staticmethod
+  def move_forward(speed):
+    return MotionControlOtto.move(speed, 0.0)
+
+  @staticmethod
+  def move_side(speed):
+    """speed>0=右移"""
+    return MotionControlOtto.move(speed, -90.0)
+
+  @staticmethod
+  def move_with_spin(speed, angle, spin):
+    """全向运动 + 自旋。spin>0=CW(yaw↓)。"""
+    s = float(speed) * MotionControlOtto._SCALE
+    rad = math.radians(float(angle))
+    vx = -s * math.sin(rad)
+    vy = s * math.cos(rad)
+    sp = float(spin)
+    v = [-vx + sp, 0.5 * vx - 0.866 * vy + sp, 0.5 * vx + 0.866 * vy + sp]
+    m = MotionControlOtto._MAP
+    return [v[m[0]], v[m[1]], v[m[2]]]
+
+
+# =============================================================================
 #                          MotorArbiter — 电机唯一写入口
 # =============================================================================
 

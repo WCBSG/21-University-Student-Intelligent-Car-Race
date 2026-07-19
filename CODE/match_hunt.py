@@ -513,8 +513,11 @@ class MatchHunt:
     # 最小绕行防 MIN_DUTY 卡死
     if abs(rot_n) < 0.25: rot_n = 0.25 * (1 if rot_n >= 0 else -1)
     rot_n = self._clamp(rot_n, -1.0, 1.0)
-    spin = rot_n * float(c.orbit_front_spin)
-    slip = rot_n * float(c.orbit_front_slip)
+    # y2 自适应轴距: 远(y2小)→大圈(factor>1)，近(y2大)→小圈(factor<1)
+    y2_factor = 2.0 - 1.7 * (y2 / 100.0)
+    y2_factor = self._clamp(y2_factor, 0.3, 2.0)
+    spin = rot_n * float(c.orbit_front_spin) / y2_factor
+    slip = rot_n * float(c.orbit_front_slip) * y2_factor
     if bool(c.orbit_front_flip): slip = -slip
     lat_extra = self._clamp(
       (cx - 50.0) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
