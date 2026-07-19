@@ -1,61 +1,36 @@
-"""
-main.py — 纯比赛固件（无 Menu / 无 LCD）
-
-上电：Motors → Config → IMU → Camera → TCS → Match
-等待 IMU 标定 + 相机握手完成后串口提示 READY
-短按 C20：发车 / 急停 / DONE 后再开一局
-状态全部记录日志(如果启用),不输出串口
-"""
-
 from machine import Pin, UART
 from time import sleep_ms, ticks_ms, ticks_diff
 import gc
 from log import info, flush as log_flush
-
 LED = Pin('C4', Pin.OUT, pull=Pin.PULL_UP_47K, value=True)
 C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
-
-
-# 主循环 GC：低水位触发 + 回差/冷却，避免空转收和连收堵主循环
 _gc_last_ms = 0
-_gc_need_ok = False  # True=刚收过，等 free 回到 24576
-
-
+_gc_need_ok = False
 def _gc_maybe():
-  """运行期回收：稳为主，危急才连收。"""
   global _gc_last_ms, _gc_need_ok
   free = gc.mem_free()
-  if free >= 24576:          # _GC_OK
+  if free >= 24576:
     _gc_need_ok = False
-  if free >= 8192:           # _GC_LOW
+  if free >= 8192:
     return False
   now = ticks_ms()
-  if free >= 3072:           # _GC_CRIT — 非危急则限频
-    if _gc_need_ok or ticks_diff(now, _gc_last_ms) < 200:  # _GC_COOL_MS
+  if free >= 3072:
+    if _gc_need_ok or ticks_diff(now, _gc_last_ms) < 200:
       return False
   gc.collect()
   _gc_last_ms = now
   _gc_need_ok = gc.mem_free() < 24576
   return True
-
-
-# =============================================================================
-#                              硬件 / 模块初始化
-# =============================================================================
 info("MAIN", "Motors...")
 from motion import MotionControl, MotorArbiter, select_target
 motors = MotionControl()
 arbiter = MotorArbiter(motors)
-
 info("MAIN", "Config...")
 import config as cfg
-
-# —— 提前 import 大模块（分文件 + 分步，压单文件编译峰值 OOM） ——
 info("MAIN", "Match import...")
 gc.collect()
 from match import MatchRunner
-gc.collect()  # was _mem("post-match")
-
+gc.collect()
 info("MAIN", "IMU963...")
 from imu import ImuSensor
 imu = ImuSensor(calibrate_samples=int(cfg.imu_calibrate_samples),
@@ -77,18 +52,13 @@ imu.set_fusion_params(
   spin_dps=float(cfg.imu_spin_dps))
 info("IMU", "IMU model=%s mag=%s scale=%.3f calibrating..." % (
   imu.model, "ON" if imu.mag_enabled else "OFF", float(cfg.imu_gyro_scale)))
-gc.collect()  # was _mem("imu")
-
+gc.collect()
 from smartcar import ticker
-
 _imu_err_n = 0
 _tcs_on_line = False
 _tcs_last_ms = 0
 _tcs_err_n = 0
-
-
 def _on_tick_imu(_):
-  """200Hz — IMU 更新（始终运行）"""
   global _imu_err_n
   try:
     imu.update()
@@ -96,13 +66,10 @@ def _on_tick_imu(_):
     _imu_err_n += 1
     if _imu_err_n <= 3:
       info("IMU", "update err: %s" % e)
-
-
 tkr_imu = ticker(1)
 tkr_imu.capture_list(imu.raw)
 tkr_imu.callback(_on_tick_imu)
-tkr_imu.start(5)  # 200Hz
-
+tkr_imu.start(5)
 info("MAIN", "Camera UART5...")
 from camera import CameraRx
 camera = CameraRx(
@@ -110,7 +77,6 @@ camera = CameraRx(
   timeout_ms=cfg.tracking_cam_timeout_ms,
   poll_max_frames=cfg.camera_poll_max_frames,
   poll_budget_ms=cfg.camera_poll_budget_ms)
-
 info("MAIN", "TCS...")
 from tcs3472 import TCS3472, make_i2c
 tcs = TCS3472(make_i2c())
@@ -119,17 +85,12 @@ tcs.yellow_r_min = float(cfg.tcs_r_min)
 tcs.yellow_g_min = float(cfg.tcs_g_min)
 tcs.yellow_b_max = float(cfg.tcs_b_max)
 tcs.yellow_c_min = int(cfg.tcs_c_min)
-gc.collect()  # was _mem("tcs")
-
-# —— 实例化（所有硬件依赖已就绪） ——
+gc.collect()
 info("MAIN", "Match build...")
-gc.collect()  # was _mem("pre-build")
+gc.collect()
 match = MatchRunner(arbiter, tcs, cfg, imu)
-gc.collect()  # was _mem("ready")
-
-
+gc.collect()
 def _poll_tcs(now):
-  """主循环 50Hz 采样；bit-bang I2C 与 PWM 均不在 ticker 中执行。"""
   global _tcs_on_line, _tcs_last_ms, _tcs_err_n
   if ticks_diff(now, _tcs_last_ms) < int(cfg.tcs_poll_ms):
     return
@@ -146,10 +107,6 @@ def _poll_tcs(now):
     _tcs_on_line = False
     if _tcs_err_n <= 3 or _tcs_err_n % 100 == 0:
       info("TCS", "sample err x%d: %s" % (_tcs_err_n, e))
-
-# =============================================================================
-#                              传感器打包
-# =============================================================================
 _has_target = False
 _target = None
 _y2 = 0.0
@@ -166,8 +123,6 @@ _sensors = {
   "brick": None,
   "suspect_target": None,
 }
-
-
 def _build_sensors():
   global _has_target, _target, _y2, _filt_ms, _last_frame_ms
   new_frame = False
@@ -207,8 +162,6 @@ def _build_sensors():
         _target = None
         _y2 = 0.0
         raw_dets = []
-
-      # 低置信度疑似目标：供 HUNT SPIN 停车观察，不直接进入 TRACK。
       if match.is_running and _target is None and raw_dets:
         allow = match.match_allow
         want = match.filter_class
@@ -222,8 +175,6 @@ def _build_sensors():
               and int(d[1]) >= suspect_min):
             if suspect_target is None or d[1] > suspect_target[1]:
               suspect_target = d
-
-      # brick 挡路检测: 同方向 + 更近（y2更大）→ blocking
       _brick_blocking = False
       if match.is_running and raw_dets:
         tcx = _target[6] if _target is not None else 50.0
@@ -239,7 +190,6 @@ def _build_sensors():
                 brick_target = d
         _brick_blocking = brick_target is not None
     else:
-      # ★ 基于时间戳超时清目标: 300ms 无帧 → 清 (适应 10FPS 低帧率)
       if (_last_frame_ms and
           ticks_diff(ticks_ms(), _last_frame_ms) > int(cfg.tracking_stale_ms)):
         _has_target = False
@@ -253,10 +203,7 @@ def _build_sensors():
     _y2 = 0.0
     _last_frame_ms = 0
     _brick_blocking = False
-
-  # TCS 已由主循环 50Hz 轮询，此处直接读缓存电平。
   on_line = _tcs_on_line
-
   _sensors["new_frame"] = new_frame
   _sensors["has_target"] = _has_target
   _sensors["target"] = _target
@@ -267,19 +214,10 @@ def _build_sensors():
   _sensors["brick"] = brick_target
   _sensors["suspect_target"] = suspect_target
   return _sensors
-
-
-# =============================================================================
-#                              启动等待：标定 + 握手
-# =============================================================================
 _imu_ok = False
 _cam_ok = False
-
-# 等松开上电时可能按住的 C20
 while C20.value() == 0:
   sleep_ms(20)
-
-# —— IMU 标定（超时 10s） ——
 info("BOOT", "Wait IMU calib...")
 LED.high()
 _imu_t0 = ticks_ms()
@@ -294,8 +232,6 @@ if _imu_ok:
   info("BOOT", "IMU calibrated yaw=%.1f" % imu.get_yaw())
 else:
   info("BOOT", "IMU calibration TIMEOUT — fast LED blink")
-
-# —— 摄像头握手 ——
 info("BOOT", "Camera handshake...")
 _hs = False
 for retry in range(1, 41):
@@ -311,7 +247,6 @@ for retry in range(1, 41):
 _cam_ok = _hs
 if not _hs:
   info("BOOT", "Camera handshake TIMEOUT — slow LED blink")
-
 LED.low()
 if _imu_ok and _cam_ok:
   info("BOOT", "======== READY: short-press C20 to START ========")
@@ -321,12 +256,7 @@ elif not _imu_ok:
   info("BOOT", "======== IMU FAILED — check sensor ========")
 if not _cam_ok:
   info("BOOT", "======== CAMERA FAILED — start locked ========")
-gc.collect()  # was _mem("boot-done")
-
-# =============================================================================
-#                              主循环
-# =============================================================================
-# 相位: IDLE(等C20) | RUN | FAULT | DONE
+gc.collect()
 phase = "IDLE"
 c20_last = 1
 c20_down_ms = 0
@@ -337,18 +267,15 @@ _last_tcs_log_ms = ticks_ms()
 _loop = 0
 _last_match_phase = ""
 _cam_retry_ms = 0
-
 while True:
   now = ticks_ms()
   dt = ticks_diff(now, _last_ms) / 1000.0
   if dt <= 0.0 or dt > 0.15:
     dt = 0.02
-    if _loop > 10:  # 跳过启动阶段
+    if _loop > 10:
       info("MAIN", "WARN: dt=%.2fs clamped → 0.02" % (ticks_diff(now, _last_ms) / 1000.0))
   _last_ms = now
   _loop += 1
-
-  # —— C20：按下沿记时，松开边沿触发 ——
   c20_now = C20.value()
   if not c20_now and c20_last:
     c20_down_ms = now
@@ -373,21 +300,15 @@ while True:
           info("MATCH", "start refused phase=%s" % match.phase)
     c20_down_ms = 0
   c20_last = c20_now
-
-  # —— 摄像头后台重试（每 100ms） ——
   if not _cam_ok and ticks_diff(now, _cam_retry_ms) >= 100:
     _cam_retry_ms = now
     if camera.handshake(retries=1, retry_ms=80):
       _cam_ok = True
       info("BOOT", "Camera recovered!")
-
-  # —— 业务 ——
   _poll_tcs(now)
   sensors = _build_sensors()
   imu._motor_on = arbiter.motors_active
-  # 黄线检测、制动、BACKOFF 与得分均在主循环中完成。
   match.tick(dt, sensors)
-
   if phase == "RUN":
     LED.low()
     if match.phase != _last_match_phase:
@@ -400,23 +321,16 @@ while True:
       phase = "FAULT"
       info("MATCH", "FAULT: %s — C20 to acknowledge" % match.fault_reason)
   elif phase == "DONE":
-    # 闪烁提示完赛
     LED.value(0 if ((now // 150) % 8) < 3 else 1)
   elif phase == "FAULT":
-    # 快速双闪：明确区别于 IDLE / DONE / 传感器启动失败。
     _fault_slot = now % 1000
     LED.value(0 if (_fault_slot < 100 or 200 <= _fault_slot < 300) else 1)
   elif not _imu_ok:
-    # IMU 初始化失败：快闪 (周期 ~200ms)
     LED.value(0 if (now % 200) < 100 else 1)
   elif not _cam_ok:
-    # 摄像头初始化失败：慢闪 (周期 ~1000ms)
     LED.value(0 if (now % 1000) < 500 else 1)
   else:
-    # IDLE 长亮：等待发车
     LED.low()
-
-  # ── 精简日志: NAV(500ms) + STAT(3s) ──
   if ticks_diff(now, _last_cal_ms) >= 500:
     _last_cal_ms = now
     nav = match.navigation_snapshot(sensors)
@@ -428,18 +342,14 @@ while True:
       nav[0], nav[1] or "-", nav[2], nav[4], cx, y2,
       nav[7], nav[8], nav[9], d0, d1, d2, arbiter.owner or "-",
       nav[10], nav[11], int(sensors.get("brick_blocking", False))))
-
   if ticks_diff(now, _last_stat_ms) >= 3000:
     _last_stat_ms = now
     info("MEM", "free=%d" % gc.mem_free())
     log_flush()
-
   if (sensors.get("tcs_on_line") and
       ticks_diff(now, _last_tcs_log_ms) >= 300):
     _last_tcs_log_ms = now
     r, g, b, c, rn, gn, bn, ok = tcs.last_rgb()
     info("TCS", "ON R=%d G=%d B=%d C=%d ok=%s" % (r, g, b, c, ok))
-
   _gc_maybe()
-
   sleep_ms(5)

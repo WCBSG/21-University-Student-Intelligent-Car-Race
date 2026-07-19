@@ -1,24 +1,11 @@
-"""
-camera.py — UART 帧协议 + CameraRx 接收器（二合一）
-
-帧: [0xAA][CMD][LEN][DATA:LEN][CRC]
-转义: 0xAA→BB 00, 0xBB→BB 01
-CMD: 0x01(连接请求) 0x02(自检结果) 0x03(开始检测) 0x10(检测帧)
-"""
-
 import time
-
 TIMEOUT_MS = 50
 _CHUNK = 60
-
-
 def _crc(data):
   c = 0
   for b in data:
     c ^= b
   return c & 0xFF
-
-
 def _escape(data):
   r = bytearray()
   for b in data:
@@ -29,8 +16,6 @@ def _escape(data):
     else:
       r.append(b)
   return bytes(r)
-
-
 def _unescape(data):
   r = bytearray()
   i = 0
@@ -48,8 +33,6 @@ def _unescape(data):
     r.append(b)
     i += 1
   return bytes(r)
-
-
 def _send_frame(uart, cmd, payload=b''):
   esc = _escape(payload)
   if len(esc) > 255:
@@ -69,8 +52,6 @@ def _send_frame(uart, cmd, payload=b''):
     return True
   except Exception:
     return False
-
-
 def _recv_frame(uart, timeout_ms=TIMEOUT_MS):
   if uart.any() < 4:
     return None, None
@@ -100,8 +81,6 @@ def _recv_frame(uart, timeout_ms=TIMEOUT_MS):
   if buf[2 + length] != _crc(bytearray([cmd, length]) + payload):
     return None, None
   return cmd, _unescape(payload)
-
-
 def _parse(payload, out=None):
   if out is None:
     out = []
@@ -122,21 +101,16 @@ def _parse(payload, out=None):
     out.append((cs >> 5, cs & 0x1F, x, y, w, h,
                 x + w / 2, y + h / 2, w * h, y + h))
   return out
-
-
 class DetectionFrame:
   def __init__(self, num, detections):
     self.num = num
     self.detections = detections
     self.has_target = num > 0
-
   def update(self, detections):
     self.detections = detections
     self.num = len(detections)
     self.has_target = self.num > 0
     return self
-
-
 class CameraRx:
   def __init__(self, uart, timeout_ms=5000, poll_max_frames=2,
                poll_budget_ms=4):
@@ -149,9 +123,7 @@ class CameraRx:
     self._last_ms = 0
     self._ready = False
     self._failed = False
-
   def poll(self, max_frames=None, budget_ms=None):
-    """在给定帧数/时间预算内收包，返回本拍最后一个检测帧。"""
     limit = self._poll_max_frames if max_frames is None else max(1, int(max_frames))
     budget = self._poll_budget_ms if budget_ms is None else max(1, int(budget_ms))
     started = time.ticks_ms()
@@ -172,7 +144,6 @@ class CameraRx:
       else:
         handled += 1
     return result
-
   def handshake(self, retries=50, retry_ms=100):
     rt = max(10, retry_ms - 20)
     self._ready = self._failed = False
@@ -194,23 +165,18 @@ class CameraRx:
           return False
         time.sleep_ms(5)
     return False
-
   @property
   def timed_out(self):
     return self._last_ms and time.ticks_diff(time.ticks_ms(), self._last_ms) > self._timeout_ms
-
   @property
   def is_ready(self):
     return self._ready
-
   @property
   def failed(self):
     return self._failed
-
   def set_ready(self):
     self._ready = True
     self._last_ms = time.ticks_ms()
-
   def flush(self):
     for _ in range(256):
       if not self._uart.any():

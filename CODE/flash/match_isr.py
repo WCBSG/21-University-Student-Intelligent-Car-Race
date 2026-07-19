@@ -1,10 +1,6 @@
-# match_isr.py — 场锁检测 + 主循环 BACKOFF mixin
-# TCS、刹车、计分与 BACKOFF 均在主循环完成，不在 ticker ISR 中访问 I/O。
 from time import ticks_ms, ticks_diff
 from log import info
 from motion import wrap_deg
-
-
 class MatchIsr:
   def flush_deferred(self):
     if self._def_armed:
@@ -30,9 +26,7 @@ class MatchIsr:
         info("MATCH", "BACKOFF done → HOME")
       elif bo == 3:
         info("MATCH", "BACKOFF done → FWD (center)")
-
   def check_field_lock(self, on_line=None, now=None):
-    """主循环 50Hz：更新场锁状态并置黄线事件，不直接写 PWM。"""
     if self._backoff_busy or self._yellow_hit:
       return
     if not self.field_lock_enabled:
@@ -45,7 +39,6 @@ class MatchIsr:
       now = ticks_ms()
     if self._boundary_pending:
       if self._boundary_need_cross:
-        # 出库进场：必须先见到黄线再离线，才算进场并武装
         if on_line:
           self._boundary_saw_line = True
         elif self._boundary_saw_line:
@@ -67,15 +60,12 @@ class MatchIsr:
       self._yellow_hit = True
       self._yellow_hit_phase = self.phase
       self._tcs.reset_crossed()
-
   def consume_yellow_hit(self):
-    """主循环：消费黄线标志 → 计分（若 PUSH）→ 启动 BACKOFF。"""
     if not self._yellow_hit:
       return False
     self._yellow_hit = False
     hit_phase = self._yellow_hit_phase
     self._yellow_hit_phase = ""
-    # 出库完成前忽略（防库外武装后压出库线误 BACKOFF）
     if not self._field_entered:
       info("MATCH", "yellow ignored (not entered yet)")
       return False
@@ -90,7 +80,6 @@ class MatchIsr:
         self._def_score = 2
     self._start_backoff()
     return True
-
   def _start_backoff(self):
     if self._backoff_busy:
       return
@@ -109,7 +98,6 @@ class MatchIsr:
     self._post_backoff = None
     self._spin_good = 0
     self._write_bo()
-
   def _backoff_spin_control(self):
     err = self._yaw_err(self._yaw_target)
     control_err = err
@@ -119,16 +107,13 @@ class MatchIsr:
       control_err, self._control_dt(), self._yaw_rate())
     limit = float(self._cfg.backoff_spin_max_duty)
     return err, self._clamp(raw, -limit, limit)
-
   def step_backoff(self):
-    """主循环：BACKOFF 原子步进（后退 → 闭环 PD 自旋 180°）。"""
     if not self._backoff_busy:
       return
     now = ticks_ms()
     if self._backoff_sub == "RETREAT":
       elapsed = ticks_diff(now, self._backoff_ms)
       timed = elapsed > int(self._cfg.recover_backoff_ms)
-      # 最少后退，防 reset_crossed 后 on_line 抖动误切 SPIN
       if elapsed >= int(self._cfg.backoff_retreat_min_ms):
         on_line = bool(self._tcs.on_line)
         if (not on_line) or timed:
@@ -160,7 +145,6 @@ class MatchIsr:
       if ticks_diff(now, self._backoff_ms) > int(self._cfg.backoff_spin_timeout_ms):
         self._finish_backoff(False)
         return
-
   def _finish_backoff(self, aligned):
     self._hold_yaw = self._yaw_target if aligned else self._yaw()
     self._arb.hold_brake(self.OWNER)
@@ -175,7 +159,6 @@ class MatchIsr:
       self._post_backoff = "FWD"
       self._def_bo = 3
     self._backoff_busy = False
-
   def _write_bo(self, duties=None):
     if self._backoff_sub == "RETREAT":
       self._write_heading_locked(
@@ -184,7 +167,6 @@ class MatchIsr:
     else:
       self._arb.write(self.OWNER, duties)
       self._set_command(0.0, 0.0, float(duties[0]))
-
   def _push_score_ready(self):
     if not self._tcs.on_line:
       return False
@@ -194,7 +176,6 @@ class MatchIsr:
     if abs(self._yaw_err(self._hold_yaw)) > float(self._cfg.align_tol_deg) * 2.0:
       return False
     return True
-
   def _credit_score(self):
     self.scored_count += 1
     if self._active_cls is not None:

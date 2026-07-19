@@ -1,18 +1,12 @@
-# match_hunt.py — 场内找物/推送 phase mixin（单独编译）
-# HUNT(搜+跟) / ALIGN(绕轴对齐+贴近) / PUSH：Match 全程占用电机
 from time import ticks_ms, ticks_diff, ticks_add
 from log import info
 from motion import MotionControl, wrap_deg
-
 _SPIN_CIRCLE_DEG = 360.0
-
-
 class MatchHunt:
   def _enter_hunt(self, reverse=False, tracking=False, forward=False):
     self._see_streak = 0
     kept = self._active_cls
     self._set_pick_class()
-    # 已锁定类别时保留（_set_pick_class 会清成 None）
     if kept is not None and tracking:
       self._lock_active_class(kept)
     self._take_motors()
@@ -45,14 +39,11 @@ class MatchHunt:
       self._sub = "SPIN"
     info("MATCH", "→ HUNT sub=%s cls=%s reverse=%s" % (
       self._sub, self._active_cls, reverse))
-
   def _arm_boundary_when_clear(self):
-    """武装场锁。出库前：须压过起点黄线再离线；进场后：离线即武装。"""
     self._boundary_armed = False
     self._yellow_hit = False
     self._tcs.reset_crossed()
     if not self._field_entered:
-      # 库外/出库中：禁止立刻武装，否则压进场黄线会误触发 BACKOFF
       self._boundary_pending = True
       self._boundary_need_cross = True
       self._boundary_saw_line = bool(self._tcs.on_line)
@@ -68,12 +59,10 @@ class MatchHunt:
       self._boundary_pending = False
       self._boundary_armed = True
       info("MATCH", "boundary armed")
-
   def _abort_repick(self, why):
     info("MATCH", "%s" % why)
     self._brake()
     self._enter_hunt()
-
   def _enter_push(self):
     self._take_motors()
     self._approach_deadline = 0
@@ -99,13 +88,10 @@ class MatchHunt:
     self.phase = "PUSH"
     self._sub = "DRIVE"
     info("MATCH", "→ PUSH")
-
   def _push_cx_ok(self, cx):
     return (float(self._cfg.push_cx_left_min) <= float(cx) <=
             float(self._cfg.push_cx_right_max))
-
   def _push_occlusion_ok(self):
-    """贴头遮挡才继续推：末帧仍居中且近；划走/过偏后丢失则否。"""
     if self._push_slipped or self._sub == "CORRECT":
       return False
     if not self._push_seen:
@@ -113,10 +99,8 @@ class MatchHunt:
     if not self._push_cx_ok(self._push_last_cx):
       return False
     return self._push_last_y2 >= float(self._cfg.tracking_stage_bottom_pct)
-
   def _push_reseek(self, why):
     self._abort_repick("PUSH reseek — %s" % why)
-
   def _enter_align(self, target_yaw):
     self._take_motors()
     self._yaw_target = float(target_yaw)
@@ -134,11 +118,9 @@ class MatchHunt:
     self._sub = "TURN"
     info("MATCH", "→ ALIGN push_yaw=%.1f cur=%.1f" % (
       self._yaw_target, self._yaw()))
-
   def _tick_leave(self, sensors):
     now = ticks_ms()
     target = sensors.get("target") if sensors else None
-    # 看到目标 → 锁定并提前退出（仅比赛三类，忽略 XB/brick）
     if self._seen_target(sensors) and target is not None and int(target[0]) in (0, 1, 2):
       self._lock_active_class(target[0])
       self._arm_boundary_when_clear()
@@ -156,40 +138,29 @@ class MatchHunt:
         info("MATCH", "LEAVE → see target → HUNT cls=%s" % self._active_cls)
         self._enter_hunt(tracking=True)
       return
-
     on_line = self._on_line(sensors)
-
-    # ── EXIT: 直行 → 压黄线 → 跨线 ──
     if self._sub == "EXIT":
       if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
         self._enter_leave_shift()
         return
-
       if on_line:
         self._leave_saw_line = True
-
       if self._leave_saw_line and not on_line:
         self._enter_leave_shift()
         return
-
       self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
       return
-
-    # ── SHIFT: 横向平移 (锁航向) ──
     if self._sub == "SHIFT":
       if ticks_diff(now, self._phase_ms) > int(self._cfg.leave_shift_ms):
         info("MATCH", "LEAVE SHIFT done → HUNT")
         self._enter_hunt()
         return
-
       self._write_lateral_locked(
         float(self._cfg.leave_shift_duty),
         self._hold_yaw,
         self._leave_shift_dir)
       return
-
   def _enter_leave_shift(self):
-    # LEAVE 已结束：跨线或超时均视为进入场内，后续离线即可武装场锁。
     self._field_entered = True
     self._boundary_need_cross = False
     self._boundary_saw_line = False
@@ -203,26 +174,21 @@ class MatchHunt:
       self._phase_ms = ticks_ms()
       label = {1: "RIGHT", -1: "LEFT"}.get(shift_dir, str(shift_dir))
       info("MATCH", "LEAVE crossed line → SHIFT dir=%s" % label)
-
   def _write_lateral_locked(self, speed, yaw_tgt, shift_dir):
     if self._backoff_busy:
       return
     lat = float(speed) * float(shift_dir)
     self._write_heading_locked(0.0, lat, yaw_tgt)
-
   def _lock_active_class(self, cls_id):
     self._active_cls = int(cls_id)
     self._filter_class = self._active_cls
     self._match_allow = None
-
   def _hunt_arrive_y2(self):
-    """决赛：stage 或已很近都可进 ALIGN；预赛：stop/contact。"""
     c = self._cfg
     if c.match_mode != "pre":
       return min(float(c.tracking_stage_bottom_pct),
                  float(c.tracking_contact_bottom_pct) - 5.0)
     return float(c.tracking_stop_bottom_pct)
-
   def _on_hunt_arrived(self, sensors):
     t = sensors.get("target") if sensors else None
     if t is None:
@@ -238,7 +204,6 @@ class MatchHunt:
         self._abort_repick("push skip — cx=%.1f not ahead" % cx)
     else:
       self._enter_align(ty)
-
   def _hunt_begin_reverse(self):
     self._sub = "SPIN"
     self._hunt_search_dir = -self._hunt_search_dir
@@ -250,9 +215,7 @@ class MatchHunt:
     self._confirm_n = 0
     self._lost_n = 0
     info("MATCH", "HUNT lost → flip spin dir=%d" % self._hunt_search_dir)
-
   def _hunt_queue_update(self, sensors):
-    """队首连续 n 帧无物→队尾；连续 n 帧见某物→置队首。仅搜索态。"""
     if self._active_cls is not None:
       return
     if not self._remaining or len(self._remaining) < 2:
@@ -292,9 +255,7 @@ class MatchHunt:
         n, head, self._remaining[0]))
       self._set_pick_class()
       self._queue_miss = 0
-
   def _tick_hunt_fwd(self, sensors, now):
-    """回中区：朝 hold_yaw 前进寻物；见目标→TRACK；超时→SPIN。"""
     if sensors and sensors.get("brick_blocking"):
       self._enter_hunt_evade(sensors, now, "FWD")
       return
@@ -323,7 +284,6 @@ class MatchHunt:
       info("MATCH", "HUNT FWD timeout → SPIN")
       return
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
-
   def _tick_hunt_spin(self, sensors, now):
     has_tgt = bool(sensors and sensors.get("has_target"))
     if sensors and sensors.get("new_frame"):
@@ -353,7 +313,6 @@ class MatchHunt:
     if has_tgt:
       self._coast()
       return
-    # 正一圈 / 反一圈
     yaw = self._yaw()
     d = wrap_deg(yaw - self._rev_start_yaw)
     self._spin_acc += abs(d)
@@ -367,9 +326,7 @@ class MatchHunt:
       info("MATCH", "HUNT SPIN flip dir=%d" % self._hunt_search_dir)
     self._write_spin_rate(
       float(self._cfg.tracking_search_speed) * self._hunt_search_dir)
-
   def _tick_hunt_observe(self, sensors, now):
-    """疑似目标停车观察，同时给磁力计留出静止修正窗口。"""
     self._hold_brake()
     if sensors and sensors.get("new_frame") and sensors.get("has_target"):
       self._confirm_n += 1
@@ -393,7 +350,6 @@ class MatchHunt:
       self._observe_cooldown_ms = ticks_add(
         now, int(self._cfg.tracking_observe_cooldown_ms))
       info("MATCH", "HUNT OBSERVE timeout → SPIN")
-
   def _enter_hunt_evade(self, sensors, now, return_sub="TRACK"):
     brick = sensors.get("brick") if sensors else None
     self._hunt_evade_dir = (
@@ -403,7 +359,6 @@ class MatchHunt:
     self._hunt_evade_return = return_sub
     self._sub = "EVADE"
     info("MATCH", "HUNT → EVADE dir=%+.0f" % self._hunt_evade_dir)
-
   def _tick_hunt_evade(self, now):
     if ticks_diff(now, self._hunt_evade_ms) >= int(self._cfg.hunt_evade_ms):
       self._sub = self._hunt_evade_return
@@ -416,7 +371,6 @@ class MatchHunt:
       float(self._cfg.hunt_evade_forward_duty),
       self._hunt_evade_dir * float(self._cfg.hunt_evade_lateral_duty),
       self._hunt_evade_yaw)
-
   def _tick_hunt_track(self, sensors, now):
     has_tgt = bool(sensors and sensors.get("has_target"))
     y2 = float(sensors.get("y2", 0.0)) if sensors else 0.0
@@ -452,7 +406,6 @@ class MatchHunt:
            self._bearing_pid.update(be, real_dt, be_rate))
     self._write_vector(
       float(self._cfg.tracking_approach_speed), 0.0, rot, False)
-
   def _tick_hunt(self, sensors):
     if sensors and sensors.get("cam_timeout"):
       self._fault("cam timeout in HUNT")
@@ -473,16 +426,13 @@ class MatchHunt:
       self._tick_hunt_fwd(sensors, now)
     else:
       self._tick_hunt_spin(sensors, now)
-
   def _align_lost_soft(self, sensors):
-    """丢目标：短暂滑行；久丢则角速度扫弦找球。返回 True=已回 HUNT。"""
     self._coast()
     if sensors and sensors.get("new_frame"):
       self._vision_lost += 1
     wait = int(self._cfg.orbit_lost_frames)
     if self._vision_lost < wait:
       return False
-    # 中丢：PD 扫弦找球（target_yaw 每帧推进，PD 平滑跟踪防过冲）
     search_spd = float(self._cfg.tracking_search_speed)
     if not self._align_sweep_active:
       self._align_sweep_active = True
@@ -494,13 +444,10 @@ class MatchHunt:
     if self._vision_lost < wait * 4:
       self._write_spin_rate(search_spd * self._align_search_dir)
       return False
-    # 久丢：回 HUNT（不换类 skip）
     info("MATCH", "ALIGN lost long → HUNT")
     self._enter_hunt(reverse=True)
     return True
-
   def _write_orbit_pd(self, forward, lateral, rotation):
-    """ALIGN 绕轴输出：航向旋转量由 PD 给出，复用共享 duty 缓冲。"""
     fwd = float(forward) * MotionControl._FWD_K
     side = -float(lateral) * MotionControl._SIDE_K
     duties = self._mix_duties
@@ -509,9 +456,7 @@ class MatchHunt:
     duties[2] = self._clamp(-2.0 * side + rotation, -100.0, 100.0)
     self._set_command(forward, lateral, rotation)
     self._arb.write(self.OWNER, duties, False)
-
   def _tick_align(self, sensors):
-    """TURN：航向不对绕前方轴；航向对→平移居中→接触→PUSH。丢目标→HUNT。"""
     c = self._cfg
     now = ticks_ms()
     if (self._approach_deadline and
@@ -529,7 +474,6 @@ class MatchHunt:
     if sensors and sensors.get("new_frame"):
       self._vision_lost = 0
       self._align_sweep_active = False
-
     cx = float(target[6])
     y2 = float(target[9])
     yaw_err = self._yaw_err(self._yaw_target)
@@ -539,23 +483,18 @@ class MatchHunt:
     lat_spd = float(c.orbit_speed)
     contact = float(c.tracking_contact_bottom_pct)
     cx_off = cx - 50.0
-    # yaw_ok 滞回：进入后放宽到 1.5× 防振荡
     yaw_ok = abs(yaw_err) <= yaw_tol
     if not yaw_ok and self._was_yaw_ok:
       yaw_ok = abs(yaw_err) <= yaw_tol * 1.5
     self._was_yaw_ok = yaw_ok
-    # 目标近接触时放宽 cx 容差（贴脸无法精确居中对齐）
     near_contact = y2 >= float(c.tracking_contact_bottom_pct)
     cx_ok = abs(cx_off) <= (cx_tol * 2.0 if near_contact else cx_tol)
-    # 网球(cls=1)轻: 保持更远距离，yaw对齐后再靠近防止顶飞
     stage_y2 = float(c.tracking_stage_bottom_pct)
     tgt_cls = int(target[0])
     if tgt_cls == 1:
       stage_y2 = max(stage_y2 - 15.0, 60.0)
     radial = (stage_y2 - y2) * float(c.orbit_radial_kp)
     radial = self._clamp(radial, -float(c.orbit_radial_max), float(c.orbit_radial_max))
-
-    # 中小航向误差优先平移+PD 修正，避免高重心车频繁绕轴。
     translate_mode = abs(yaw_err) <= float(c.orbit_translate_yaw_deg)
     if yaw_ok or translate_mode:
       lateral = self._clamp(
@@ -568,7 +507,6 @@ class MatchHunt:
         approach = float(c.tracking_final_approach_speed)
         approach *= max(0.5, 1.0 - cx_abs / 50.0)
       else:
-        # 尚未对准时只做小幅径向移动，主要依靠平移回正。
         approach = self._clamp(radial, -8.0, 8.0)
       self._write_vector(approach, lateral, rot, use_min_duty=True)
       ready = yaw_ok and cx_ok and y2 >= contact
@@ -579,8 +517,6 @@ class MatchHunt:
         info("MATCH", "ALIGN → PUSH yaw=%.1f cx=%.1f" % (self._yaw(), cx))
         self._enter_push()
       return
-
-    # 航向不对：先退后留空间再绕行（退到 y2≤stage 为止）
     if self._orbit_backoff:
       min_done = ticks_diff(now, self._phase_ms) >= int(c.orbit_backoff_min_ms)
       if (not min_done) or y2 > stage_y2:
@@ -588,8 +524,6 @@ class MatchHunt:
           -float(c.orbit_backoff_duty), self._orbit_backoff_yaw)
         return
       self._orbit_backoff = False
-
-    # 绕轴力度按航向误差定幅，不再受 heading_max(锁航向用)压死。
     edge = abs(cx_off) / 50.0
     if edge > 1.0:
       edge = 1.0
@@ -605,7 +539,6 @@ class MatchHunt:
         (abs_err - translate_deg) / span_deg, 0.0, 1.0)
       min_scale = float(c.orbit_brake_min_scale)
       strength = min_scale + (1.0 - min_scale) * ratio
-    # PID 只决定方向与轻阻尼；幅值由 strength 提供。
     dt = self._control_dt()
     pid_out = self._hdg_pid.update(yaw_err, dt, yaw_rate)
     dir_s = float(c.yaw_actuation_sign)
@@ -624,7 +557,6 @@ class MatchHunt:
     slip = rot_n * float(c.orbit_front_slip) * clearance
     if bool(c.orbit_front_flip):
       slip = -slip
-    # 最小侧移保持可动；近物只轻度缩小，不能缩到静摩擦以下。
     min_slip = float(c.orbit_min_slip) * max(0.7, clearance)
     if abs(slip) < min_slip:
       slip = min_slip * (1 if slip >= 0 else -1)
@@ -635,7 +567,6 @@ class MatchHunt:
     self._write_orbit_pd(fwd_duty, side_total, spin)
     if sensors and sensors.get("new_frame"):
       self._orbit_confirm = 0
-
   def _push_watch_frame(self, sensors, elapsed):
     if not sensors or not sensors.get("new_frame"):
       return None
@@ -647,7 +578,6 @@ class MatchHunt:
         return None
       if elapsed < int(self._cfg.push_entry_grace_ms):
         return "grace"
-      # 旧逻辑：盲区后一律当遮挡继续推 → 物体划走仍全速冲黄线
       if (elapsed >= int(self._cfg.push_lost_blind_ms) and
           self._push_occlusion_ok()):
         self._push_lost_n = 0
@@ -681,15 +611,13 @@ class MatchHunt:
     if self._push_skew_n >= need:
       return "correct"
     return None
-
   def _write_push_correct(self, sensors):
-    """PD侧移闭环纠偏, 减速前推, 不转车头"""
     t = sensors.get("target") if sensors else None
     if t is None:
       self._hold_brake()
       return
     cx = float(t[6])
-    err_cx = cx - 50.0  # cx>50→右偏→右移跟随
+    err_cx = cx - 50.0
     lateral = self._clamp(
       err_cx * float(self._cfg.push_correct_lateral_kp) -
       self._push_cx_rate * float(self._cfg.push_correct_lateral_kd),
@@ -697,7 +625,6 @@ class MatchHunt:
       float(self._cfg.push_correct_lateral_max))
     self._write_heading_locked(
       float(self._cfg.push_correct_duty), lateral, self._hold_yaw)
-
   def _tick_push(self, sensors):
     now = ticks_ms()
     elapsed = ticks_diff(now, self._phase_ms)
@@ -747,7 +674,6 @@ class MatchHunt:
           self._evade_dir * float(self._cfg.push_evade_lateral_duty),
           self._hold_yaw)
         return
-
     if watch == "correct":
       if self._sub != "CORRECT":
         self._sub = "CORRECT"
@@ -761,7 +687,6 @@ class MatchHunt:
     if self._sub == "CORRECT":
       self._write_push_correct(sensors)
       return
-
     push_duty = float(self._cfg.push_duty)
     if self._push_last_y2 >= float(self._cfg.push_slow_zone_y2):
       push_duty = min(push_duty, float(self._cfg.push_slow_duty))

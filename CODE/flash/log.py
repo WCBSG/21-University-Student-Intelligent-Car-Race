@@ -1,18 +1,11 @@
-"""
-log.py — 统一日志接口（仅写文件）
-  info(tag, msg) → [t+sss.ss] [TAG] msg → /flash/log.txt
-"""
 import os
 from time import ticks_ms
-
 _buf = []
 _buf_bytes = 0
 _path = '/flash/log.txt'
-MAX_KB = 6144  # 6MB
+MAX_KB = 6144
 _FLUSH_BYTES = 512
 _FLUSH_LINES = 8
-
-
 def _flush():
   global _buf, _buf_bytes
   if not _buf:
@@ -34,22 +27,14 @@ def _flush():
         os.remove(_path)
   except Exception:
     pass
-
-
 def _write(line):
   global _buf_bytes
   _buf.append(line)
   _buf_bytes += len(line)
   if _buf_bytes >= _FLUSH_BYTES or len(_buf) >= _FLUSH_LINES:
     _flush()
-
-
 def flush():
-  """显式落盘；主循环可在低频状态日志后调用。"""
   _flush()
-
-
 def info(tag, msg):
-  """带标签日志: [t+sss.ss] [TAG] msg → 文件"""
   line = "[%6.2f] [%s] %s" % (ticks_ms() / 1000, tag, msg)
   _write(line + '\n')
