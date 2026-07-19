@@ -19,20 +19,25 @@ test_leave.py — LEAVE 出库状态独立测试 (EXIT → SHIFT)
 from imu import ImuSensor
 from motion import MotionControl, MotorArbiter, HeadingPID, wrap_deg
 
-# —— 热补丁: 运动学修正（轮1反号）, 等 motion.py 重烧后可删 ——
+# —— 热补丁: 运动学(轮1反号), 等 motion.py 重烧后可删 ——
+import math
 _MC_FWD_SIDE_PATCHED = False
 def _patch_kinematics():
   global _MC_FWD_SIDE_PATCHED
   if _MC_FWD_SIDE_PATCHED:
     return
-  # move_forward: [s, -s, 0] (=move(speed, 0))
   MotionControl.move_forward = staticmethod(lambda speed: (
     lambda s = float(speed) * MotionControl._FWD_K: [s, -s, 0.0])())
-  # move_side: [s, s, -2s] (=move(speed, -90), 右移)
   MotionControl.move_side = staticmethod(lambda speed: (
     lambda s = float(speed) * MotionControl._SIDE_K: [s, s, -2.0 * s])())
+  def _move(speed, angle):
+    r = math.radians(-angle)
+    c = math.cos(r) / math.sqrt(3)
+    s = math.sin(r) / 3
+    return [speed*(s+c), speed*(s-c), speed*(-2*s)]
+  MotionControl.move = staticmethod(_move)
   _MC_FWD_SIDE_PATCHED = True
-  print("[patch] move_forward/move_side 已修正")
+  print("[patch] move/move_forward/move_side 已修正")
 from time import ticks_ms, ticks_diff, sleep_ms
 from smartcar import ticker
 

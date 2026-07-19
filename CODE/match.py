@@ -79,6 +79,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._spin_acc = 0.0
     self._leave_saw_line = False
     self._leave_shift_dir = 0
+    self._was_yaw_ok = False
 
   def _get_leave_shift(self):
     """出库平移方向: +1=右移, -1=左移, 0=直行"""
@@ -172,6 +173,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._spin_acc = 0.0
     self._leave_saw_line = False
     self._leave_shift_dir = 0
+    self._was_yaw_ok = False
     self._cache_backoff_duties()
     self.phase = "LEAVE"
     self._sub = "EXIT"

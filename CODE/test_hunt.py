@@ -20,13 +20,19 @@ from motion import MotionControl, MotorArbiter, HeadingPID, wrap_deg as _wrap
 from time import ticks_ms, ticks_diff, sleep_ms
 from smartcar import ticker
 
-# —— 热补丁: 运动学, 等 motion.py 重烧后可删 ——
+# —— 热补丁: 运动学(轮1反号), 等 motion.py 重烧后可删 ——
+import math as _math
 def _patch_kinematics():
   MotionControl.move_forward = staticmethod(lambda speed: (
     lambda s = float(speed) * MotionControl._FWD_K: [s, -s, 0.0])())
   MotionControl.move_side = staticmethod(lambda speed: (
     lambda s = float(speed) * MotionControl._SIDE_K: [s, s, -2.0 * s])())
-
+  def _move(speed, angle):
+    r = _math.radians(-angle)
+    c = _math.cos(r) / _math.sqrt(3)
+    s = _math.sin(r) / 3
+    return [speed*(s+c), speed*(s-c), speed*(-2*s)]
+  MotionControl.move = staticmethod(_move)
 _patch_kinematics()
 
 # ── 全局 ──
