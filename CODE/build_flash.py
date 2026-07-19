@@ -457,22 +457,6 @@ def process_tree(src_root, dst_root, strip_log=False):
             except Exception as e:
                 n_err += 1
                 print("[ERR] %s: %s" % (src_path, e))
-        elif name.endswith(".json"):
-            if should_skip_file(name):
-                n_skip += 1
-                print("[SKIP] %s" % src_path)
-                continue
-            try:
-                with open(src_path, "r", encoding="utf-8") as f:
-                    raw = f.read()
-                stripped = strip_json_for_build(raw, name, drop_debug=strip_log)
-                with open(dst_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(stripped)
-                bytes_in += len(raw.encode("utf-8"))
-                bytes_out += len(stripped.encode("utf-8"))
-            except Exception as e:
-                n_err += 1
-                print("[ERR] %s: %s" % (src_path, e))
         else:
             if should_skip_file(name):
                 n_skip += 1
@@ -488,6 +472,7 @@ def main():
     ap = argparse.ArgumentParser(description="Strip CODE/ into CODE/.flash/")
     ap.add_argument("--src", default="CODE", help="source tree")
     ap.add_argument("--dst", default=os.path.join("CODE", ".flash"), help="output tree")
+    ap.add_argument("--strip-log", action="store_true", help="strip log.py and all info/log_setup calls")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -499,12 +484,10 @@ def main():
         print("source not found: %s" % src)
         return 1
 
-    # 读取 config.json 的 "调试输出": false → 剥离 log.py 与所有 info/log_setup 调用
-    debug = read_debug_output(os.path.join(src, "config.json"))
-    strip_log = (debug is False)
+    strip_log = args.strip_log
     print("src: %s" % src)
     print("dst: %s" % dst)
-    print("debug output: %s -> strip_log=%s" % (debug, strip_log))
+    print("strip_log=%s" % strip_log)
     n_py, n_skip, n_err, bin_, bout = process_tree(src, dst, strip_log=strip_log)
     saved = bin_ - bout
     pct = (100.0 * saved / bin_) if bin_ else 0.0

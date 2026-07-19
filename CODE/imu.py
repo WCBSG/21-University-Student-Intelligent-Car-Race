@@ -11,18 +11,16 @@ import math
 from seekfree import IMU963RX
 
 # ±8g → 4096 LSB/g；963 = LSM6DSR → 70 mdps/LSB = 14.286 LSB/dps
-ACC_LSB_PER_G = 4096.0
-GYRO_LSB_963 = 14.286
-DEG_TO_RAD = math.pi / 180.0
-RAD_TO_DEG = 180.0 / math.pi
+# ACC_LSB_PER_G = 4096.0   DEG_TO_RAD = pi/180 = 0.01745329
+# GYRO_LSB_963  = 14.286    RAD_TO_DEG = 180/pi = 57.29578
 
 
 def _acc_to_g(raw):
-  return raw / ACC_LSB_PER_G
+  return raw / 4096.0
 
 
 def _gyro_to_radps(raw, lsb):
-  return raw / lsb * DEG_TO_RAD
+  return raw / lsb * 0.01745329
 
 
 # =============================================================================
@@ -114,7 +112,7 @@ class MadgwickAHRS:
     """当前四元数偏航角 deg [-180, 180]。"""
     yaw = math.atan2(2.0 * (self.q0 * self.q3 + self.q1 * self.q2),
                      1.0 - 2.0 * (self.q2 * self.q2 + self.q3 * self.q3))
-    return yaw * RAD_TO_DEG
+    return yaw * 57.29578
 
   def reset(self):
     self.q0 = 1.0
@@ -139,7 +137,7 @@ class ImuSensor:
       self.raw = IMU963RX(imu_type=IMU963RX.TYPE_RA)
     except (TypeError, AttributeError):
       self.raw = IMU963RX()
-    self._gyro_lsb = GYRO_LSB_963
+    self._gyro_lsb = 14.286
 
     self.data = self.raw.get()
 
@@ -223,7 +221,7 @@ class ImuSensor:
     gz -= self._bias[2]
 
     gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
-    self._gyro_dps = gyro_mag * RAD_TO_DEG
+    self._gyro_dps = gyro_mag * 57.29578
     acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
     is_still = (gyro_mag < self._gyro_still) and (abs(acc_mag - 1.0) < self._acc_still)
 
@@ -303,7 +301,7 @@ class ImuSensor:
   def _yaw_from_quat(q0, q1, q2, q3):
     yaw = math.atan2(2.0 * (q0 * q3 + q1 * q2),
                      1.0 - 2.0 * (q2 * q2 + q3 * q3))
-    return yaw * RAD_TO_DEG
+    return yaw * 57.29578
 
   def get_madgwick_yaw(self):
     """纯 Madgwick 航向（无磁偏置）。"""
@@ -341,7 +339,7 @@ class ImuSensor:
     cos_p, sin_p = math.cos(pitch), math.sin(pitch)
     mx_h = mx * cos_p + mz * sin_p
     my_h = mx * sin_r * sin_p + my * cos_r - mz * sin_r * cos_p
-    return self._normalize_angle(math.atan2(-my_h, mx_h) * RAD_TO_DEG)
+    return self._normalize_angle(math.atan2(-my_h, mx_h) * 57.29578)
 
   def get_mag_rel(self):
     mag = self.get_mag_heading()

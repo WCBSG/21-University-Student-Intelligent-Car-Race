@@ -104,7 +104,7 @@ class MatchHunt:
       return False
     if not self._push_cx_ok(self._push_last_cx):
       return False
-    return self._push_last_y2 >= float(self._cfg.tracking.stage_bottom_pct)
+    return self._push_last_y2 >= float(self._cfg.tracking_stage_bottom_pct)
 
   def _push_reseek(self, why):
     self._abort_repick("PUSH reseek — %s" % why)
@@ -129,6 +129,7 @@ class MatchHunt:
   def _tick_leave(self, sensors):
     now = ticks_ms()
     target = sensors.get("target") if sensors else None
+    # 看到目标 → 锁定并提前退出
     if self._seen_target(sensors) and target is not None:
       self._lock_active_class(target[0])
       self._cache_backoff_duties()
@@ -136,10 +137,9 @@ class MatchHunt:
       if not self._imu.is_calibrated:
         self._fault("HUNT failed (IMU not ready?)")
         return
-      # 已近且需对位 → 直进 ALIGN；否则 HUNT 跟踪
       ty = self._push_yaw()
       y2 = float(target[9])
-      stage = float(self._cfg.tracking.stage_bottom_pct)
+      stage = float(self._cfg.tracking_stage_bottom_pct)
       if (ty is not None and
           y2 >= stage - 5.0):
         info("MATCH", "LEAVE → see target → ALIGN cls=%s" % self._active_cls)
@@ -148,11 +148,69 @@ class MatchHunt:
         info("MATCH", "LEAVE → see target → HUNT cls=%s" % self._active_cls)
         self._enter_hunt(tracking=True)
       return
-    if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
-      info("MATCH", "LEAVE timeout → HUNT")
-      self._enter_hunt()
+
+    on_line = self._on_line(sensors)
+
+    # ── EXIT: 直行 → 压黄线 → 跨线 ──
+    if self._sub == "EXIT":
+      if ticks_diff(now, self._phase_ms) > int(self._cfg.drive_timeout_ms):
+        self._enter_leave_shift()
+        return
+
+      if on_line:
+        self._leave_saw_line = True
+
+      if self._leave_saw_line and not on_line:
+        self._enter_leave_shift()
+        return
+
+      self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
       return
-    self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
+
+    # ── SHIFT: 横向平移 (锁航向) ──
+    if self._sub == "SHIFT":
+      if ticks_diff(now, self._phase_ms) > int(self._cfg.leave_shift_ms):
+        info("MATCH", "LEAVE SHIFT done → HUNT")
+        self._enter_hunt()
+        return
+
+      self._write_lateral_locked(
+        float(self._cfg.leave_shift_duty),
+        self._hold_yaw,
+        self._leave_shift_dir)
+      return
+
+  def _enter_leave_shift(self):
+    shift_dir = self._get_leave_shift()
+    self._leave_shift_dir = shift_dir
+    if shift_dir == 0:
+      info("MATCH", "LEAVE crossed line → straight → HUNT")
+      self._enter_hunt(forward=True)
+    else:
+      self._sub = "SHIFT"
+      self._phase_ms = ticks_ms()
+      label = {1: "RIGHT", -1: "LEFT"}.get(shift_dir, str(shift_dir))
+      info("MATCH", "LEAVE crossed line → SHIFT dir=%s" % label)
+
+  def _write_lateral_locked(self, speed, yaw_tgt, shift_dir):
+    if self._backoff_busy:
+      return
+    now = ticks_ms()
+    dt = ticks_diff(now, self._hdg_ms) / 1000.0
+    if dt <= 0.0 or dt > 0.5:
+      dt = 0.02
+    self._hdg_ms = now
+    err = self._yaw_err(yaw_tgt)
+    rate = self._yaw_rate()
+    rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
+    lat = float(speed) * float(shift_dir)
+    side = MotionControl.move_side(lat) if abs(lat) > 1e-6 else (0.0, 0.0, 0.0)
+    duties = [
+      self._clamp(side[i] + rot, -100.0, 100.0)
+      for i in range(3)
+    ]
+    self._set_command(0.0, lat, rot)
+    self._arb.write(self.OWNER, duties)
 
   def _lock_active_class(self, cls_id):
     self._active_cls = int(cls_id)
@@ -161,12 +219,11 @@ class MatchHunt:
 
   def _hunt_arrive_y2(self):
     """决赛：stage 或已很近都可进 ALIGN；预赛：stop/contact。"""
-    tr = self._cfg.tracking
-    if self._cfg.match_mode != "pre":
-      stage = float(tr.stage_bottom_pct)
-      contact = float(tr.contact_bottom_pct)
-      return min(stage, contact - 5.0)
-    return float(tr.stop_bottom_pct)
+    c = self._cfg
+    if c.match_mode != "pre":
+      return min(float(c.tracking_stage_bottom_pct),
+                 float(c.tracking_contact_bottom_pct) - 5.0)
+    return float(c.tracking_stop_bottom_pct)
 
   def _on_hunt_arrived(self, sensors):
     t = sensors.get("target") if sensors else None
@@ -245,7 +302,7 @@ class MatchHunt:
         self._confirm_n += 1
       else:
         self._confirm_n = 0
-      if self._confirm_n >= int(self._cfg.tracking.confirm_frames):
+      if self._confirm_n >= int(self._cfg.tracking_confirm_frames):
         t = sensors.get("target")
         if t is not None:
           self._lock_active_class(t[0])
@@ -273,7 +330,7 @@ class MatchHunt:
         self._confirm_n += 1
       else:
         self._confirm_n = 0
-      if self._confirm_n >= int(self._cfg.tracking.confirm_frames):
+      if self._confirm_n >= int(self._cfg.tracking_confirm_frames):
         t = sensors.get("target")
         if t is not None:
           self._lock_active_class(t[0])
@@ -297,7 +354,7 @@ class MatchHunt:
         self._search_dir = 1
       self._spin_acc = 0.0
       info("MATCH", "HUNT SPIN flip dir=%d" % self._search_dir)
-    s = float(self._cfg.tracking.search_speed) * self._search_dir
+    s = float(self._cfg.tracking_search_speed) * self._search_dir
     self._write_spin(s)
 
   def _tick_hunt_track(self, sensors, now):
@@ -312,7 +369,7 @@ class MatchHunt:
         self._lost_n = 0
       else:
         self._lost_n += 1
-      if self._lost_n >= int(self._cfg.tracking.lost_frames):
+      if self._lost_n >= int(self._cfg.tracking_lost_frames):
         self._hunt_begin_reverse()
         return
     t = sensors.get("target") if sensors else None
@@ -328,13 +385,13 @@ class MatchHunt:
     be_rate = (be - self._prev_be) / be_dt if 0.001 < be_dt < 0.5 else 0.0
     self._prev_be = be
     self._be_ms = now
-    rot = (float(self._cfg.tracking.bearing_actuation_sign) *
+    rot = (float(self._cfg.tracking_bearing_actuation_sign) *
            self._bearing_pid.update(be, real_dt, be_rate))
-    fwd = MotionControl.move(float(self._cfg.tracking.approach_speed), 0.0)
+    fwd = MotionControl.move(float(self._cfg.tracking_approach_speed), 0.0)
     duties = [
       self._clamp(fwd[i] + rot, -100.0, 100.0) for i in range(3)
     ]
-    self._set_command(float(self._cfg.tracking.approach_speed), 0.0, rot)
+    self._set_command(float(self._cfg.tracking_approach_speed), 0.0, rot)
     self._arb.write(self.OWNER, duties)
 
   def _tick_hunt(self, sensors):
@@ -363,7 +420,7 @@ class MatchHunt:
     if self._vision_lost < wait:
       return False
     # 中丢：PD 扫弦找球（target_yaw 每帧推进，PD 平滑跟踪防过冲）
-    search_spd = float(self._cfg.tracking.search_speed)
+    search_spd = float(self._cfg.tracking_search_speed)
     if self._vision_lost == wait:
       self._search_dir = -self._search_dir
       if self._search_dir == 0:
@@ -410,11 +467,11 @@ class MatchHunt:
     yaw_tol = float(c.orbit_yaw_tol_deg)
     cx_tol = float(c.orbit_center_tol_pct)
     lat_spd = float(c.orbit_speed)
-    contact = float(c.tracking.contact_bottom_pct)
+    contact = float(c.tracking_contact_bottom_pct)
     cx_off = cx - 50.0
     yaw_ok = abs(yaw_err) <= yaw_tol
     cx_ok = abs(cx_off) <= cx_tol
-    stage_y2 = float(c.tracking.stage_bottom_pct)
+    stage_y2 = float(c.tracking_stage_bottom_pct)
     radial = (stage_y2 - y2) * float(c.orbit_radial_kp)
     radial = self._clamp(
       radial,
@@ -450,7 +507,7 @@ class MatchHunt:
       rot = (float(c.yaw_actuation_sign) *
              self._hdg_pid.update(yaw_err, dt, yaw_rate) * 0.35)
       self._write_vector(
-        float(c.tracking.final_approach_speed), lateral, rot)
+        float(c.tracking_final_approach_speed), lateral, rot)
       return
 
     # TURN：推方向已对 → 全向平移把目标移到镜头中心；否则才绕前方轴
@@ -540,7 +597,7 @@ class MatchHunt:
     be_rate = (bearing - self._prev_be) / be_dt if 0.001 < be_dt < 0.5 else 0.0
     self._prev_be = bearing
     self._be_ms = now
-    rot = (float(self._cfg.tracking.bearing_actuation_sign) *
+    rot = (float(self._cfg.tracking_bearing_actuation_sign) *
            self._bearing_pid.update(bearing, self._control_dt(), be_rate))
     self._write_vector(float(self._cfg.push_correct_duty), 0.0, rot)
 

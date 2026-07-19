@@ -215,11 +215,11 @@ def wrap_deg(a):
 
 
 def select_target(detections, cfg, allow=None, target_class=None):
-  """allow / target_class 由 MatchRunner 注入；未传则用 cfg.tracking。"""
+  """allow / target_class 由 MatchRunner 注入；未传则用 cfg 默认值。"""
   if not detections:
     return None
-  tc = int(cfg.tracking.target_class) if target_class is None else int(target_class)
-  mc = cfg.tracking.min_confidence
+  tc = int(cfg.tracking_target_class) if target_class is None else int(target_class)
+  mc = cfg.tracking_min_confidence
   candidates = []
   for d in detections:
     cid, sc = d[0], d[1]

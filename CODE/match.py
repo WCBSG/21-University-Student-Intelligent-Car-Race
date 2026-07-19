@@ -26,13 +26,13 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._active_cls = None
     # 视觉筛选（运行时状态，不写回 cfg）
     self._match_allow = None
-    self._filter_class = int(cfg.tracking.target_class)
+    self._filter_class = int(cfg.tracking_target_class)
     self._yaw_target = 0.0
     self._hold_yaw = 0.0
     self._home_y2 = None
     self._home_deadline = 0
-    self._hdg_pid = HeadingPID(gains=cfg.heading)
-    self._bearing_pid = HeadingPID(gains=cfg.tracking_bearing)
+    self._hdg_pid = HeadingPID(kp=cfg.heading_kp, kd=cfg.heading_kd, max_output=cfg.heading_max, deadband=cfg.heading_db)
+    self._bearing_pid = HeadingPID(kp=cfg.tracking_kp, kd=cfg.tracking_kd, max_output=cfg.tracking_max, deadband=cfg.tracking_db)
     self._hdg_ms = ticks_ms()
     self._ctrl_ms = ticks_ms()
     self._track_ms = ticks_ms()
@@ -77,6 +77,19 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._queue_see = 0
     self._queue_see_cls = -1
     self._spin_acc = 0.0
+    self._leave_saw_line = False
+    self._leave_shift_dir = 0
+
+  def _get_leave_shift(self):
+    """出库平移方向: +1=右移, -1=左移, 0=直行"""
+    layout = int(self._cfg.start_layout)
+    if layout in (0, 1):      # 底边中 → 直行
+      return 0
+    if layout == 2:           # 左下角 → 右移
+      return 1
+    if layout == 3:           # 右下角 → 左移
+      return -1
+    return 0
 
   @property
   def match_allow(self):
@@ -157,8 +170,11 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._queue_see = 0
     self._queue_see_cls = -1
     self._spin_acc = 0.0
+    self._leave_saw_line = False
+    self._leave_shift_dir = 0
     self._cache_backoff_duties()
     self.phase = "LEAVE"
+    self._sub = "EXIT"
     self._take_motors()
     info("MATCH", "START → LEAVE hold_yaw=%.1f" % self._hold_yaw)
     return True
@@ -179,7 +195,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self.phase = "IDLE"
     self._sub = ""
     self._match_allow = None
-    self._filter_class = int(self._cfg.tracking.target_class)
+    self._filter_class = int(self._cfg.tracking_target_class)
     self._brake()
 
   def tick(self, dt, sensors):
@@ -383,34 +399,27 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._filter_class = 7
     self._active_cls = None
 
+  # 硬编码推箱方向 (IMU yaw): cls=0沙包→90°, cls=1网球→0°, cls=2熊→-90°
+  _PUSH_HDG = {0: 90.0, 1: 0.0, 2: -90.0}
+
   def _push_yaw(self):
-    """决赛推箱车头朝向 = 场心 + 推箱偏角（物品应去的方向）。
-    车须站在该方向反侧、朝该方向推；ALIGN 负责转到此朝向并贴近。
-    """
+    """决赛推箱车头朝向。预赛返回 None。"""
     c = self._cfg
     if c.match_mode == "pre":
       return None
     cls = self._active_cls
     if cls is None:
       cls = self._filter_class
-    off = c.hdg_off_for(cls)
-    if off == 0.0 and all(abs(float(x)) < 1e-6 for x in c.hdg_off):
-      return None
-    return wrap_deg(c.push_hdg_ref + off)
+    return self._PUSH_HDG.get(int(cls))
 
   def _home_plan(self):
-    """回库几何相对场心：左下发车先朝左(+90)再朝发车(+180)。
-    不用推箱偏角（偏角可整体平移标定，与回库方向无关）。"""
-    c = self._cfg
-    href = float(c.push_hdg_ref)
-    layout = int(c.start_layout)
+    """回库 yaw: layout=1直180°; 2=先90°再180°; 3=先-90°再180°"""
+    layout = int(self._cfg.start_layout)
     if layout == 2:
-      return wrap_deg(href + 90.0), wrap_deg(href + 180.0)
+      return 90.0, 180.0
     if layout == 3:
-      return wrap_deg(href - 90.0), wrap_deg(href + 180.0)
-    if layout == 4:
-      return wrap_deg(href + 90.0), None
-    return wrap_deg(href + 180.0), None
+      return -90.0, 180.0
+    return 180.0, None  # layout 1: 底边中
 
   def _enter_home(self):
     y1, y2 = self._home_plan()

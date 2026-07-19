@@ -4,7 +4,7 @@ main.py — 纯比赛固件（无 Menu / 无 LCD）
 上电：Motors → Config → IMU → Camera → TCS → Match
 等待 IMU 标定 + 相机握手完成后串口提示 READY
 短按 C20：发车 / 急停 / DONE 后再开一局
-状态全部 print 到串口
+状态全部记录日志(如果启用),不输出串口
 """
 
 from machine import Pin, UART
@@ -17,45 +17,25 @@ C20 = Pin('C20', Pin.IN, pull=Pin.PULL_UP_47K)
 
 
 # 主循环 GC：低水位触发 + 回差/冷却，避免空转收和连收堵主循环
-_GC_LOW = 8192     # 低于此考虑回收
-_GC_OK = 24576     # 回差：曾低于 LOW 并回收后，须先回到此以上才再次常规触发
-_GC_CRIT = 3072    # 危急：无视冷却/回差，立刻收
-_GC_COOL_MS = 200  # 两次常规 collect 最短间隔
-
 _gc_last_ms = 0
-_gc_need_ok = False  # True=刚收过，等 free 回到 _GC_OK
-
-
-def _mem(tag):
-  """启动/阶段点强制回收并打点（仅初始化路径调用）。"""
-  global _gc_last_ms, _gc_need_ok
-  gc.collect()
-  _gc_last_ms = ticks_ms()
-  _gc_need_ok = False
-  info("MEM", "%s free=%d" % (tag, gc.mem_free()))
+_gc_need_ok = False  # True=刚收过，等 free 回到 24576
 
 
 def _gc_maybe():
   """运行期回收：稳为主，危急才连收。"""
   global _gc_last_ms, _gc_need_ok
   free = gc.mem_free()
-  if free >= _GC_OK:
+  if free >= 24576:          # _GC_OK
     _gc_need_ok = False
-  if free >= _GC_LOW:
+  if free >= 8192:           # _GC_LOW
     return False
   now = ticks_ms()
-  crit = free < _GC_CRIT
-  if not crit:
-    if _gc_need_ok:
-      return False
-    if ticks_diff(now, _gc_last_ms) < _GC_COOL_MS:
+  if free >= 3072:           # _GC_CRIT — 非危急则限频
+    if _gc_need_ok or ticks_diff(now, _gc_last_ms) < 200:  # _GC_COOL_MS
       return False
   gc.collect()
   _gc_last_ms = now
-  free2 = gc.mem_free()
-  _gc_need_ok = free2 < _GC_OK
-  if free2 < _GC_LOW:
-    info("MEM", "WARN after collect %d→%d" % (free, free2))
+  _gc_need_ok = gc.mem_free() < 24576
   return True
 
 
@@ -68,14 +48,13 @@ motors = MotionControl()
 arbiter = MotorArbiter(motors)
 
 info("MAIN", "Config...")
-from config import config as cfg, load_config
-load_config()
+import config as cfg
 
 # —— 提前 import 大模块（分文件 + 分步，压单文件编译峰值 OOM） ——
 info("MAIN", "Match import...")
-_mem("pre-match")
+gc.collect()
 from match import MatchRunner
-_mem("post-match")
+gc.collect()  # was _mem("post-match")
 
 info("MAIN", "IMU963...")
 from imu import ImuSensor
@@ -98,7 +77,7 @@ imu.set_fusion_params(
   spin_dps=float(cfg.imu_spin_dps))
 info("IMU", "IMU model=%s mag=%s scale=%.3f calibrating..." % (
   imu.model, "ON" if imu.mag_enabled else "OFF", float(cfg.imu_gyro_scale)))
-_mem("imu")
+gc.collect()  # was _mem("imu")
 
 from smartcar import ticker
 
@@ -143,7 +122,7 @@ tkr_tcs.callback(_on_tick_tcs)
 
 info("MAIN", "Camera UART5...")
 from camera import CameraRx
-camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking.cam_timeout_ms)
+camera = CameraRx(UART(5, baudrate=460800), timeout_ms=cfg.tracking_cam_timeout_ms)
 
 info("MAIN", "TCS...")
 from tcs3472 import TCS3472, make_i2c
@@ -154,14 +133,14 @@ tcs.yellow_g_min = float(cfg.tcs_g_min)
 tcs.yellow_b_max = float(cfg.tcs_b_max)
 tcs.yellow_c_min = int(cfg.tcs_c_min)
 _tcs_ready = True  # 比赛阶段 50Hz 轮询；积分~154ms，50Hz 足够过 5cm 黄线
-_mem("tcs")
+gc.collect()  # was _mem("tcs")
 
 # —— 实例化（所有硬件依赖已就绪） ——
 info("MAIN", "Match build...")
-_mem("pre-build")
+gc.collect()  # was _mem("pre-build")
 match = MatchRunner(arbiter, tcs, cfg, imu)
 _match_ref = match
-_mem("ready")
+gc.collect()  # was _mem("ready")
 
 # =============================================================================
 #                              传感器打包
@@ -201,7 +180,7 @@ def _build_sensors():
           if raw_n > 0 and ticks_diff(now, _filt_ms) > 1000:
             _filt_ms = now
             d0 = frame.detections[0]
-            want = match.filter_class if match.is_running else cfg.tracking.target_class
+            want = match.filter_class if match.is_running else cfg.tracking_target_class
             allow = match.match_allow if match.is_running else None
             info("CAM", "filtered n=%d cls=%d sc=%d want=%s allow=%s" % (
               raw_n, int(d0[0]), int(d0[1]), want, allow))
@@ -289,7 +268,7 @@ elif not _imu_ok:
   info("BOOT", "======== IMU FAILED — check sensor ========")
 if not _cam_ok:
   info("BOOT", "======== CAMERA FAILED — start locked ========")
-_mem("boot-done")
+gc.collect()  # was _mem("boot-done")
 
 # =============================================================================
 #                              主循环

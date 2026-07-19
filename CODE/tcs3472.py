@@ -14,17 +14,6 @@ from log import info
 
 # 本车接线: SCL=C19 SDA=C18（GPIO bit-bang，不依赖硬件 I2C）
 
-_REG_ENABLE  = 0x80
-_REG_ATIME   = 0x81
-_REG_CONTROL = 0x8F
-_REG_ID      = 0x92
-_REG_CDATA   = 0x94
-_REG_RDATA   = 0x96
-_REG_GDATA   = 0x98
-_REG_BDATA   = 0x9A
-
-_INTEGRATION_154MS = 0xC0
-_GAIN_1X = 0x00
 
 
 class BitBangI2C:
@@ -108,7 +97,7 @@ def make_i2c(freq=100000):
 class TCS3472:
   """TCS3472XFN。I2C 7-bit addr = 0x29。"""
 
-  def __init__(self, i2c, addr=0x29, gain=_GAIN_1X, atime=_INTEGRATION_154MS):
+  def __init__(self, i2c, addr=0x29, gain=0x00, atime=0xC0):
     self._i2c = i2c
     self._addr = addr
     self._gain = gain
@@ -139,12 +128,12 @@ class TCS3472:
     if self._gave_up:
       return
     try:
-      id_val = self._read8(_REG_ID)
+      id_val = self._read8(0x92)
       if id_val != 0x44 and id_val != 0x4D:
         info("TCS", "WARN: ID 0x%02X" % id_val)
-      self._write8(_REG_ENABLE, 0x03)
-      self._write8(_REG_ATIME, self._atime)
-      self._write8(_REG_CONTROL, self._gain)
+      self._write8(0x80, 0x03)
+      self._write8(0x81, self._atime)
+      self._write8(0x8F, self._gain)
       self._inited = True
       self._err_n = 0
       self._read_ok = False
@@ -162,10 +151,10 @@ class TCS3472:
       self._on_i2c_error()
       return self._last_rgb
     try:
-      c = self._read16(_REG_CDATA)
-      r = self._read16(_REG_RDATA)
-      g = self._read16(_REG_GDATA)
-      b = self._read16(_REG_BDATA)
+      c = self._read16(0x94)
+      r = self._read16(0x96)
+      g = self._read16(0x98)
+      b = self._read16(0x9A)
       self._last_rgb = (r, g, b, c)
       self._err_n = 0
       self._read_ok = True
