@@ -72,6 +72,8 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._def_armed = False
     self._bo_retreat = [0.0, 0.0, 0.0]
     self._bo_spin = [0.0, 0.0, 0.0]
+    self._spin_good = 0
+    self._spin_start_yaw = 0.0
     self._home_turn_ok = 0
     self._queue_miss = 0
     self._queue_see = 0
@@ -290,7 +292,7 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._clamp(fwd[2] + rot, -100.0, 100.0),
     ]
     self._set_command(speed, 0.0, rot)
-    self._arb.write(self.OWNER, duties)
+    self._arb.write(self.OWNER, duties, False)
 
   def _control_dt(self):
     now = ticks_ms()
@@ -311,7 +313,7 @@ class MatchRunner(MatchIsr, MatchHunt):
       for i in range(3)
     ]
     self._set_command(forward, lateral, rot)
-    self._arb.write(self.OWNER, duties)
+    self._arb.write(self.OWNER, duties, False)
 
   @staticmethod
   def _clamp(v, lo, hi):
@@ -339,9 +341,9 @@ class MatchRunner(MatchIsr, MatchHunt):
   def _spin_toward(self, target):
     err = self._yaw_err(target)
     tol = float(self._cfg.align_tol_deg)
-    if abs(err) <= tol:
+    if abs(err) <= tol and abs(self._yaw_rate()) < 30.0:
       self._home_turn_ok += 1
-      if self._home_turn_ok >= 3:
+      if self._home_turn_ok >= 8:
         self._hold_brake()
         self._home_turn_ok = 0
         return True
@@ -460,6 +462,8 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._home_backoff_turn(now)
     elif sub == "LEG2_DRIVE":
       self._home_leg2_drive(on_line)
+    elif sub == "CROSS":
+      self._home_cross(now)
 
   def _home_leave_line(self, now, on_line):
     if not on_line:
@@ -482,16 +486,15 @@ class MatchRunner(MatchIsr, MatchHunt):
   def _home_leg1_drive(self, now, on_line):
     if on_line:
       if self._home_y2 is None:
-        self._brake()
-        self._finish()
+        self._hold_brake()
+        self._sub = "CROSS"
+        self._phase_ms = now
+        info("MATCH", "HOME → CROSS")
         return
       self._hold_brake()
       self._sub = "BACKOFF"
       self._phase_ms = now
       info("MATCH", "HOME → BACKOFF")
-      return
-    if abs(self._yaw_err(self._hold_yaw)) > 12.0:
-      self._spin_toward(self._hold_yaw)
       return
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
 
@@ -526,10 +529,17 @@ class MatchRunner(MatchIsr, MatchHunt):
 
   def _home_leg2_drive(self, on_line):
     if on_line:
-      self._finish()
+      self._hold_brake()
+      self._sub = "CROSS"
+      self._phase_ms = ticks_ms()
+      info("MATCH", "HOME → CROSS")
       return
-    if abs(self._yaw_err(self._hold_yaw)) > 12.0:
-      self._spin_toward(self._hold_yaw)
+    self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
+
+  def _home_cross(self, now):
+    """过线后继续前进 1 秒，防止停在线上。"""
+    if ticks_diff(now, self._phase_ms) >= 1000:
+      self._finish()
       return
     self._write_move_locked(float(self._cfg.drive_duty), self._hold_yaw)
 

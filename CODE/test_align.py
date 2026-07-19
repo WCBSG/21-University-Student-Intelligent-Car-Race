@@ -96,7 +96,7 @@ def _write_vector(forward, lateral, rot):
   fwd = MotionControl.move_forward(float(forward)) if abs(forward) > 1e-6 else (0.0, 0.0, 0.0)
   side = MotionControl.move_side(float(lateral)) if abs(lateral) > 1e-6 else (0.0, 0.0, 0.0)
   duties = [_clamp(fwd[i] + side[i] + rot, -100.0, 100.0) for i in range(3)]
-  _arb.write(_OWNER, duties)
+  _arb.write(_OWNER, duties, False)
 
 def _hold_brake(): _arb.hold_brake(_OWNER)
 def _brake(): _arb.force_brake()
@@ -259,7 +259,7 @@ def tick():
   # 绕行时不前推，保持距离；由 yaw_ok 路径的 radial 负责保距
   fwd = (0.0, 0.0, 0.0)
   duties = [_clamp(fwd[i] + side[i] + spin, -100.0, 100.0) for i in range(3)]
-  _arb.write(_OWNER, duties)
+  _arb.write(_OWNER, duties, False)
   if sensors.get("new_frame"): _orbit_confirm = 0
 
 # ── 监控 ──

@@ -221,7 +221,7 @@ def tick():
     lateral = _clamp(err_cx * 0.6 - d_cx * 0.5, -60.0, 60.0)
     fwd = MotionControl.move_forward(12.0)  # 减速前推
     side = MotionControl.move_side(lateral) if abs(lateral) > 1e-6 else (0.0, 0.0, 0.0)
-    _arb.write(_OWNER, [_clamp(fwd[i]+side[i], -100, 100) for i in range(3)])
+    _arb.write(_OWNER, [_clamp(fwd[i]+side[i], -100, 100) for i in range(3)], False)
     return
 
   # ── DRIVE: 全速前推 + 航向锁 ──
@@ -231,7 +231,7 @@ def tick():
   err = _yaw_err(_hold_yaw); rate = _yaw_rate()
   rot = _yaw_actuation_sign * _hdg_pid.update(err, dt, rate)
   fwd = MotionControl.move_forward(_push_duty)
-  _arb.write(_OWNER, [_clamp(fwd[i]+rot, -100, 100) for i in range(3)])
+  _arb.write(_OWNER, [_clamp(fwd[i]+rot, -100, 100) for i in range(3)], False)
 
 # ── 监控 ──
 def mon():

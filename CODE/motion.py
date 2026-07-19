@@ -39,21 +39,22 @@ class MotionControl:
   # ——————————————————————————————————————————————————————————
   MIN_DUTY = 7  # 最低占空比(%) — 克服静摩擦，3轮需6-7%
 
-  def setSpeed(self, duties):
+  def setSpeed(self, duties, use_min_duty=True):
     """
     设置三路电机占空比 [-100, 100]。
     正值=逆时针, 负值=顺时针, 0=停。
-    非零值自动提升到 MIN_DUTY 防堵转。
+    use_min_duty=False 可关闭 MIN_DUTY 提升，避免小修正失真。
     先写三路第一脚，统一 dead-time 后再写第二脚（DRV8870 需要 ≥76us）。
     """
     second = []
     for i, d in enumerate(duties):
       d = max(-100, min(100, int(d)))
       # 最低占空比：非零时至少 MIN_DUTY% 克服静摩擦
-      if 0 < d < self.MIN_DUTY:
-        d = self.MIN_DUTY
-      elif -self.MIN_DUTY < d < 0:
-        d = -self.MIN_DUTY
+      if use_min_duty:
+        if 0 < d < self.MIN_DUTY:
+          d = self.MIN_DUTY
+        elif -self.MIN_DUTY < d < 0:
+          d = -self.MIN_DUTY
       ccw, cw = self._motors[i]
       if d > 0:
         ccw.duty_u16(self._pct_to_pwm(d))
@@ -145,9 +146,9 @@ class MotorArbiter:
       self._d0 = self._d1 = self._d2 = 0.0
       self._owner = None
 
-  def write(self, cid, duties):
+  def write(self, cid, duties, use_min_duty=True):
     if self._owner == cid:
-      self._motors.setSpeed(duties)
+      self._motors.setSpeed(duties, use_min_duty)
       self._d0, self._d1, self._d2 = float(duties[0]), float(duties[1]), float(duties[2])
       return True
     now = ticks_ms()

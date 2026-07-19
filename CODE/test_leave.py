@@ -320,7 +320,7 @@ def _write_forward_locked(speed, yaw_tgt):
   rot = -1.0 * _hdg_pid.update(err, dt, rate)  # yaw_actuation_sign=-1
   fwd = MotionControl.move_forward(float(speed))
   duties = [_clamp(fwd[i] + rot, -100.0, 100.0) for i in range(3)]
-  _arb.write(_OWNER, duties)
+  _arb.write(_OWNER, duties, False)
 
 def _write_lateral_locked(speed, yaw_tgt, shift_dir):
   dt = _control_dt()
@@ -330,7 +330,7 @@ def _write_lateral_locked(speed, yaw_tgt, shift_dir):
   lat = float(speed) * float(shift_dir)  # >0 右移, <0 左移
   side = MotionControl.move_side(lat) if abs(lat) > 1e-6 else (0.0, 0.0, 0.0)
   duties = [_clamp(side[i] + rot, -100.0, 100.0) for i in range(3)]
-  _arb.write(_OWNER, duties)
+  _arb.write(_OWNER, duties, False)
 
 def stop():
   global _current_sub

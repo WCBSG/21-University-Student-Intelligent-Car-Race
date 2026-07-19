@@ -108,11 +108,12 @@ class MatchIsr:
     self._backoff_ms = ticks_ms()
     self._backoff_busy = True
     self._post_backoff = None
+    self._spin_good = 0
     self._cache_backoff_duties()
     self._write_bo(self._bo_retreat)
 
   def step_backoff(self):
-    """主循环：BACKOFF 原子步进（后退 → 转 180°）。"""
+    """主循环：BACKOFF 原子步进（后退 → 闭环 PD 自旋 180°）。"""
     if not self._backoff_busy:
       return
     now = ticks_ms()
@@ -138,14 +139,24 @@ class MatchIsr:
       self._write_bo(self._bo_retreat)
       return
     if self._backoff_sub == "SPIN":
-      turned = abs(wrap_deg(self._yaw() - self._spin_start_yaw))
-      if turned >= float(self._cfg.backoff_spin_deg):
-        self._finish_backoff(True)
-        return
-      if ticks_diff(now, self._backoff_ms) > 2000:
+      err = self._yaw_err(self._yaw_target)
+      dt = self._control_dt()
+      rate = self._yaw_rate()
+      s = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
+      self._bo_spin[0] = s
+      self._bo_spin[1] = s
+      self._bo_spin[2] = s
+      self._write_bo(self._bo_spin)
+      if abs(err) < 3.0:
+        self._spin_good += 1
+        if self._spin_good >= 5:
+          self._finish_backoff(True)
+          return
+      else:
+        self._spin_good = 0
+      if ticks_diff(now, self._backoff_ms) > 3000:
         self._finish_backoff(False)
         return
-      self._write_bo(self._bo_spin)
 
   def _finish_backoff(self, aligned):
     self._hold_yaw = self._yaw_target if aligned else self._yaw()

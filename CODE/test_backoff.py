@@ -3,11 +3,11 @@ test_backoff.py — BACKOFF 后退+自旋 独立测试 (RETREAT / SPIN)
 
 BACKOFF 逻辑:
   RETREAT: 后退至离线 (最少 N ms) → SPIN
-  SPIN: 开环自旋 170°(≈180°) → HOME 或 FWD(HUNT)
+  SPIN: 闭环 PD 自旋 180°(±3°×5帧) → HOME
 
 用法:
   >>> import test_backoff
-  >>> go()              # 启动 BACKOFF, 自旋 180°
+  >>> go()              # 启动 BACKOFF, 后退→PD自旋180°
   >>> tick() / run(20)  # 单步/连续
   >>> mon()
 """
@@ -37,7 +37,8 @@ _imu = None; _tkr = None; _motors = None; _arb = None
 _OWNER = "BACKOFF_TEST"
 _current_sub = "IDLE"; _exit_to = ""
 _phase_ms = 0; _drive_duty = 50.0; _retreat_min_ms = 800
-_spin_deg = 170.0; _yaw_target = 0.0; _spin_start_yaw = 0.0
+_spin_deg = 180.0; _yaw_target = 0.0; _spin_start_yaw = 0.0
+_SPIN_YAW_TOL = 3.0; _spin_good = 0; _SPIN_GOOD_NEED = 5
 _yaw_actuation_sign = -1.0; _hdg_pid = None
 _bo_retreat = [0.0, 0.0, 0.0]
 _ctrl_ms = 0; _rate_yaw = 0.0; _rate_ms = 0; _prev_yaw = 0.0
@@ -79,15 +80,16 @@ def init():
   _hdg_pid = HeadingPID(kp=1.1, max_output=50.0, deadband=1.0, kd=0.08)
   d = -_drive_duty; mv = MotionControl.move_forward(d)
   _bo_retreat = [mv[0], mv[1], mv[2]]
-  print("[backoff] 就绪. go() 后退+转180°")
+  print("[backoff] 就绪. go() 后退+PD自旋180°")
 
 # ── 入口 ──
 def go(hz=20):
-  global _current_sub, _exit_to, _phase_ms, _yaw_target
+  global _current_sub, _exit_to, _phase_ms, _yaw_target, _spin_good
   _arb.acquire(_OWNER)
   _yaw_target = wrap_deg(_yaw() + 180.0)
   _current_sub = "RETREAT"; _exit_to = ""
   _phase_ms = ticks_ms()
+  _spin_good = 0
   _hdg_pid.reset()
   print("[backoff] → RETREAT  target=%.1f°" % _yaw_target)
   _run_loop(hz)
@@ -98,7 +100,7 @@ def stop():
 
 # ── 帧逻辑 ──
 def tick():
-  global _current_sub, _exit_to, _spin_start_yaw, _phase_ms
+  global _current_sub, _exit_to, _spin_start_yaw, _phase_ms, _spin_good
   if _current_sub == "IDLE": return
   now = ticks_ms(); elapsed = ticks_diff(now, _phase_ms)
 
@@ -116,26 +118,29 @@ def tick():
     return
 
   if _current_sub == "SPIN":
-    turned = abs(wrap_deg(_yaw() - _spin_start_yaw))
-    if turned >= _spin_deg:
-      _arb.hold_brake(_OWNER)
-      _exit_to = "HOME"; _current_sub = "IDLE"
-      print("[backoff] SPIN done %.1f° → %s" % (turned, _exit_to))
-      return
-    if elapsed > 2000:  # 自旋超时 2s
-      _exit_to = "HOME (timeout)"; _current_sub = "IDLE"; _arb.force_brake()
-      print("[backoff] %s" % _exit_to)
-      return
     err = _yaw_err(_yaw_target)
     dt = _control_dt(); rate = _yaw_rate()
     s = _yaw_actuation_sign * _hdg_pid.update(err, dt, rate)
     _arb.write(_OWNER, [s, s, s])
+    if abs(err) < _SPIN_YAW_TOL:
+      _spin_good += 1
+      if _spin_good >= _SPIN_GOOD_NEED:
+        _arb.hold_brake(_OWNER)
+        _exit_to = "HOME"; _current_sub = "IDLE"
+        print("[backoff] SPIN done  err=%.1f° → %s" % (err, _exit_to))
+        return
+    else:
+      _spin_good = 0
+    if elapsed > 3000:  # 自旋超时 3s
+      _exit_to = "HOME (timeout)"; _current_sub = "IDLE"; _arb.force_brake()
+      print("[backoff] %s" % _exit_to)
+      return
 
 # ── 监控 ──
 def mon():
-  turned = abs(wrap_deg(_yaw() - _spin_start_yaw)) if _current_sub == "SPIN" else 0
-  print("[backoff] sub=%s  yaw=%.1f  target=%.1f  turned=%.0f/%.0f°  exit=%s" % (
-    _current_sub, _yaw(), _yaw_target, turned, _spin_deg, _exit_to or "-"))
+  err = _yaw_err(_yaw_target) if _current_sub == "SPIN" else 0
+  print("[backoff] sub=%s  yaw=%.1f  target=%.1f  err=%.1f°  good=%d/%d  exit=%s" % (
+    _current_sub, _yaw(), _yaw_target, err, _spin_good, _SPIN_GOOD_NEED, _exit_to or "-"))
 
 def _run_loop(hz=20):
   if _current_sub == "IDLE": print("[run] 请先 go()"); return

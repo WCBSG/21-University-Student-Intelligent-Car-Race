@@ -211,7 +211,7 @@ class MatchHunt:
       for i in range(3)
     ]
     self._set_command(0.0, lat, rot)
-    self._arb.write(self.OWNER, duties)
+    self._arb.write(self.OWNER, duties, False)
 
   def _lock_active_class(self, cls_id):
     self._active_cls = int(cls_id)
@@ -393,7 +393,7 @@ class MatchHunt:
       self._clamp(fwd[i] + rot, -100.0, 100.0) for i in range(3)
     ]
     self._set_command(float(self._cfg.tracking_approach_speed), 0.0, rot)
-    self._arb.write(self.OWNER, duties)
+    self._arb.write(self.OWNER, duties, False)
 
   def _tick_hunt(self, sensors):
     if sensors and sensors.get("cam_timeout"):
@@ -521,7 +521,7 @@ class MatchHunt:
     side = MotionControl.move(side_total, 90.0) if abs(side_total) > 1e-6 else (0.0, 0.0, 0.0)
     duties = [self._clamp(side[i] + spin, -100.0, 100.0) for i in range(3)]
     self._set_command(0.0, side_total, spin)
-    self._arb.write(self.OWNER, duties)
+    self._arb.write(self.OWNER, duties, False)
     if sensors and sensors.get("new_frame"):
       self._orbit_confirm = 0
 
@@ -576,7 +576,7 @@ class MatchHunt:
     side = MotionControl.move_side(lateral) if abs(lateral) > 1e-6 else (0.0, 0.0, 0.0)
     self._set_command(12.0, lateral, 0.0)
     self._arb.write(self.OWNER, [
-      self._clamp(fwd[i] + side[i], -100.0, 100.0) for i in range(3)])
+      self._clamp(fwd[i] + side[i], -100.0, 100.0) for i in range(3)], False)
 
   def _tick_push(self, sensors):
     now = ticks_ms()

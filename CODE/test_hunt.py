@@ -271,7 +271,7 @@ def tick():
     _arb.write(_OWNER, [
       _clamp(fwd[0]+rot, -100, 100),
       _clamp(fwd[1]+rot, -100, 100),
-      _clamp(fwd[2]+rot, -100, 100)])
+      _clamp(fwd[2]+rot, -100, 100)], False)
 
 # ── 监控 ──
 def mon():
