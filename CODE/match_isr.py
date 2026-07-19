@@ -124,8 +124,9 @@ class MatchIsr:
         on_line = bool(self._tcs.on_line)
         if (not on_line) or timed:
           err = self._yaw_err(self._yaw_target)
-          s = float(self._cfg.drive_duty)
-          s = self._cfg.yaw_actuation_sign * (s if err > 0 else -s)
+          dt = self._control_dt()
+          rate = self._yaw_rate()
+          s = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
           self._bo_spin[0] = s
           self._bo_spin[1] = s
           self._bo_spin[2] = s
@@ -170,7 +171,7 @@ class MatchIsr:
 
   def _cache_backoff_duties(self):
     d = -float(self._cfg.drive_duty)
-    mv = MotionControl.move(d, 0.0)
+    mv = MotionControl.move_forward(d)
     self._bo_retreat[0] = mv[0]
     self._bo_retreat[1] = mv[1]
     self._bo_retreat[2] = mv[2]

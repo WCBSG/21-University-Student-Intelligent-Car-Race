@@ -162,7 +162,7 @@ class MatchHunt:
   def _hunt_arrive_y2(self):
     """决赛：stage 或已很近都可进 ALIGN；预赛：stop/contact。"""
     tr = self._cfg.tracking
-    if getattr(self._cfg, "match_mode", "final") != "pre":
+    if self._cfg.match_mode != "pre":
       stage = float(tr.stage_bottom_pct)
       contact = float(tr.contact_bottom_pct)
       return min(stage, contact - 5.0)
@@ -324,8 +324,12 @@ class MatchHunt:
     if real_dt <= 0.0 or real_dt > 0.5:
       real_dt = 0.1
     self._track_ms = now
+    be_dt = ticks_diff(now, self._be_ms) / 1000.0
+    be_rate = (be - self._prev_be) / be_dt if 0.001 < be_dt < 0.5 else 0.0
+    self._prev_be = be
+    self._be_ms = now
     rot = (float(self._cfg.tracking.bearing_actuation_sign) *
-           self._bearing_pid.update(be, real_dt))
+           self._bearing_pid.update(be, real_dt, be_rate))
     fwd = MotionControl.move(float(self._cfg.tracking.approach_speed), 0.0)
     duties = [
       self._clamp(fwd[i] + rot, -100.0, 100.0) for i in range(3)
@@ -351,22 +355,28 @@ class MatchHunt:
       self._tick_hunt_spin(sensors, now)
 
   def _align_lost_soft(self, sensors):
-    """丢目标：刹停等待；久丢则小反转找球；不立刻 skip。返回 True=已回 HUNT。"""
+    """丢目标：刹停等待；久丢则 PD 扫弦找球；不立刻 skip。返回 True=已回 HUNT。"""
     self._hold_brake()
     if sensors and sensors.get("new_frame"):
       self._vision_lost += 1
-    # 短丢：只等
     wait = int(self._cfg.orbit_lost_frames)
     if self._vision_lost < wait:
       return False
-    # 中丢：原地反转找
+    # 中丢：PD 扫弦找球（target_yaw 每帧推进，PD 平滑跟踪防过冲）
+    search_spd = float(self._cfg.tracking.search_speed)
     if self._vision_lost == wait:
       self._search_dir = -self._search_dir
       if self._search_dir == 0:
         self._search_dir = 1
-      info("MATCH", "ALIGN lost → reverse find")
+      self._search_target_yaw = self._yaw()
+      info("MATCH", "ALIGN lost → PD sweep dir=%d" % self._search_dir)
     if self._vision_lost < wait * 4:
-      s = float(self._cfg.tracking.search_speed) * self._search_dir
+      dt = self._control_dt()
+      self._search_target_yaw = wrap_deg(
+        self._search_target_yaw + search_spd * dt * self._search_dir)
+      err = self._yaw_err(self._search_target_yaw)
+      rate = self._yaw_rate()
+      s = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
       self._write_spin(s)
       return False
     # 久丢：回 HUNT（不换类 skip）
@@ -376,12 +386,13 @@ class MatchHunt:
 
   def _tick_align(self, sensors):
     """TURN：航向不对→绕行；航向已对→全向平移居中；CLOSE：前进贴接触 → PUSH。"""
+    c = self._cfg
     now = ticks_ms()
     if (self._approach_deadline and
         ticks_diff(now, self._approach_deadline) > 0):
       self._skip_or_home("ALIGN total timeout")
       return
-    if ticks_diff(now, self._phase_ms) > int(self._cfg.orbit_timeout_ms):
+    if ticks_diff(now, self._phase_ms) > int(c.orbit_timeout_ms):
       info("MATCH", "ALIGN timeout → HUNT")
       self._enter_hunt(reverse=True)
       return
@@ -395,19 +406,20 @@ class MatchHunt:
     cx = float(target[6])
     y2 = float(target[9])
     yaw_err = self._yaw_err(self._yaw_target)
-    yaw_tol = float(self._cfg.orbit_yaw_tol_deg)
-    cx_tol = float(self._cfg.orbit_center_tol_pct)
-    lat_spd = float(self._cfg.orbit_speed)
-    contact = float(self._cfg.tracking.contact_bottom_pct)
+    yaw_rate = self._yaw_rate()
+    yaw_tol = float(c.orbit_yaw_tol_deg)
+    cx_tol = float(c.orbit_center_tol_pct)
+    lat_spd = float(c.orbit_speed)
+    contact = float(c.tracking.contact_bottom_pct)
     cx_off = cx - 50.0
     yaw_ok = abs(yaw_err) <= yaw_tol
     cx_ok = abs(cx_off) <= cx_tol
-    stage_y2 = float(self._cfg.tracking.stage_bottom_pct)
-    radial = (stage_y2 - y2) * float(self._cfg.orbit_radial_kp)
+    stage_y2 = float(c.tracking.stage_bottom_pct)
+    radial = (stage_y2 - y2) * float(c.orbit_radial_kp)
     radial = self._clamp(
       radial,
-      -float(self._cfg.orbit_radial_max),
-      float(self._cfg.orbit_radial_max))
+      -float(c.orbit_radial_max),
+      float(c.orbit_radial_max))
 
     # CLOSE：航向+居中已齐，前进贴接触；偏了优先侧移纠，不回绕行
     if self._sub == "CLOSE":
@@ -427,18 +439,18 @@ class MatchHunt:
           lateral = self._clamp(
             (50.0 - cx) / 50.0 * lat_spd, -lat_spd, lat_spd)
           dt = self._control_dt()
-          rot = (float(self._cfg.yaw_actuation_sign) *
-                 self._hdg_pid.update(yaw_err, dt))
+          rot = (float(c.yaw_actuation_sign) *
+                 self._hdg_pid.update(yaw_err, dt, yaw_rate))
           self._write_vector(0.0, lateral, rot)
         return
       # 前进贴近：cx 偏则侧移优先，少用自旋
       lateral = self._clamp(
         (50.0 - cx) / 50.0 * lat_spd, -lat_spd, lat_spd)
       dt = self._control_dt()
-      rot = (float(self._cfg.yaw_actuation_sign) *
-             self._hdg_pid.update(yaw_err, dt) * 0.35)
+      rot = (float(c.yaw_actuation_sign) *
+             self._hdg_pid.update(yaw_err, dt, yaw_rate) * 0.35)
       self._write_vector(
-        float(self._cfg.tracking.final_approach_speed), lateral, rot)
+        float(c.tracking.final_approach_speed), lateral, rot)
       return
 
     # TURN：推方向已对 → 全向平移把目标移到镜头中心；否则才绕前方轴
@@ -447,13 +459,13 @@ class MatchHunt:
         (50.0 - cx) / 50.0 * lat_spd, -lat_spd, lat_spd)
       dt = self._control_dt()
       # 轻锁航向，避免侧移时漂角
-      rot = (float(self._cfg.yaw_actuation_sign) *
-             self._hdg_pid.update(yaw_err, dt) * 0.4)
+      rot = (float(c.yaw_actuation_sign) *
+             self._hdg_pid.update(yaw_err, dt, yaw_rate) * 0.4)
       self._write_vector(radial, lateral, rot)
       ready = cx_ok
       if sensors and sensors.get("new_frame"):
         self._orbit_confirm = self._orbit_confirm + 1 if ready else 0
-      if self._orbit_confirm >= int(self._cfg.orbit_confirm_frames):
+      if self._orbit_confirm >= int(c.orbit_confirm_frames):
         self._sub = "CLOSE"
         self._bearing_pid.reset()
         self._hold_yaw = self._yaw_target
@@ -467,16 +479,16 @@ class MatchHunt:
       edge = 1.0
     spin_scale = 1.0 - 0.7 * edge
     dt = self._control_dt()
-    rot_n = (float(self._cfg.yaw_actuation_sign) *
-             self._hdg_pid.update(yaw_err, dt) * spin_scale)
+    rot_n = (float(c.yaw_actuation_sign) *
+             self._hdg_pid.update(yaw_err, dt, yaw_rate) * spin_scale)
     rot_n = self._clamp(rot_n / 40.0, -1.0, 1.0)
-    spin = rot_n * float(self._cfg.orbit_front_spin)
-    slip = rot_n * float(self._cfg.orbit_front_slip)
-    if bool(self._cfg.orbit_front_flip):
+    spin = rot_n * float(c.orbit_front_spin)
+    slip = rot_n * float(c.orbit_front_slip)
+    if bool(c.orbit_front_flip):
       slip = -slip
     lat_extra = self._clamp(
       (50.0 - cx) / 50.0 * lat_spd * 0.4, -lat_spd * 0.4, lat_spd * 0.4)
-    self._write_orbit_front(spin, slip + lat_extra, radial)
+    self._write_vector(radial, slip + lat_extra, spin)
     if sensors and sensors.get("new_frame"):
       self._orbit_confirm = 0  # 航向未齐，不算居中确认
 
@@ -522,9 +534,14 @@ class MatchHunt:
     if t is None:
       self._hold_brake()
       return
+    now = ticks_ms()
     bearing = (float(t[6]) - 50.0) / 50.0
+    be_dt = ticks_diff(now, self._be_ms) / 1000.0
+    be_rate = (bearing - self._prev_be) / be_dt if 0.001 < be_dt < 0.5 else 0.0
+    self._prev_be = bearing
+    self._be_ms = now
     rot = (float(self._cfg.tracking.bearing_actuation_sign) *
-           self._bearing_pid.update(bearing, self._control_dt()))
+           self._bearing_pid.update(bearing, self._control_dt(), be_rate))
     self._write_vector(float(self._cfg.push_correct_duty), 0.0, rot)
 
   def _tick_push(self, sensors):

@@ -14,10 +14,11 @@ CLS_LEFT, CLS_UP, CLS_RIGHT = 0, 1, 2
 
 
 class PidGains:
-  def __init__(self, kp=2.0, max_out=50.0, deadband=1.0):
+  def __init__(self, kp=2.0, max_out=50.0, deadband=1.0, kd=0.0):
     self.kp = kp
     self.max_out = max_out
     self.deadband = deadband
+    self.kd = kd
 
 
 class TrackingParams:
@@ -52,9 +53,11 @@ def _match_mode(v):
 # (中文key, 属性路径, 转换)  path=None 表示 Config 自身属性；tuple 表示嵌套
 _KEY_MAP = (
   ("航向P", ("heading", "kp"), float),
+  ("航向D", ("heading", "kd"), float),
   ("航向上限", ("heading", "max_out"), float),
   ("航向死区", ("heading", "deadband"), float),
   ("跟踪P", ("tracking_bearing", "kp"), float),
+  ("跟踪D", ("tracking_bearing", "kd"), float),
   ("跟踪上限", ("tracking_bearing", "max_out"), float),
   ("跟踪死区", ("tracking_bearing", "deadband"), float),
   ("接近速度", ("tracking", "approach_speed"), float),
@@ -139,8 +142,8 @@ _KEY_LOOKUP = {k: (path, fn) for k, path, fn in _KEY_MAP}
 
 class Config:
   def __init__(self):
-    self.heading = PidGains(kp=2.0, max_out=50.0, deadband=1.0)
-    self.tracking_bearing = PidGains(kp=1.5, max_out=60.0, deadband=0.02)
+    self.heading = PidGains(kp=2.0, max_out=50.0, deadband=1.0, kd=0.08)
+    self.tracking_bearing = PidGains(kp=1.5, max_out=60.0, deadband=0.02, kd=0.05)
     self.tracking = TrackingParams()
     self.mag_enabled = False
     self.mag_ox = 0.0
@@ -202,7 +205,7 @@ class Config:
     self.imu_mag_still_need = 100
     self.imu_still_needed = 100
     self.imu_mag_lpf_alpha = 0.01
-    self.imu_gyro_scale = 1.135
+    self.imu_gyro_scale = 1.0
     self.imu_spin_beta = 0.01
     self.imu_spin_dps = 40.0
 

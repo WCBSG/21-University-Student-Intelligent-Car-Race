@@ -36,6 +36,11 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._hdg_ms = ticks_ms()
     self._ctrl_ms = ticks_ms()
     self._track_ms = ticks_ms()
+    self._rate_yaw = 0.0
+    self._rate_ms = ticks_ms()
+    self._prev_be = 0.0
+    self._be_ms = ticks_ms()
+    self._search_target_yaw = 0.0
     self._orbit_confirm = 0
     self._vision_lost = 0
     self._confirm_n = 0
@@ -129,6 +134,10 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._hold_yaw = self._yaw()
     self._hdg_pid.reset()
     self._hdg_ms = ticks_ms()
+    self._rate_yaw = self._yaw()
+    self._rate_ms = ticks_ms()
+    self._prev_be = 0.0
+    self._be_ms = ticks_ms()
     self._boundary_armed = False
     self._boundary_pending = False
     self._backoff_busy = False
@@ -210,6 +219,19 @@ class MatchRunner(MatchIsr, MatchHunt):
   def _yaw_err(self, target):
     return wrap_deg(target - self._yaw())
 
+  def _yaw_rate(self):
+    """signed yaw 变化率(°/s): 正=CCW yaw增大。"""
+    now = ticks_ms()
+    dt = ticks_diff(now, self._rate_ms) / 1000.0
+    cur = self._yaw()
+    if dt <= 0.001 or dt > 0.5:
+      rate = 0.0
+    else:
+      rate = wrap_deg(cur - self._rate_yaw) / dt
+    self._rate_yaw = cur
+    self._rate_ms = now
+    return rate
+
   def _take_motors(self):
     self._arb.acquire(self.OWNER)
 
@@ -222,7 +244,10 @@ class MatchRunner(MatchIsr, MatchHunt):
     if self._backoff_busy:
       return
     self._set_command(speed, 0.0, 0.0)
-    self._arb.write(self.OWNER, MotionControl.move(speed, angle))
+    if abs(angle) < 1e-6:
+      self._arb.write(self.OWNER, MotionControl.move_forward(speed))
+    else:
+      self._arb.write(self.OWNER, MotionControl.move(speed, angle))
 
   def _set_command(self, forward, lateral, rotation):
     self._cmd_forward = float(forward)
@@ -238,8 +263,9 @@ class MatchRunner(MatchIsr, MatchHunt):
       dt = 0.02
     self._hdg_ms = now
     err = self._yaw_err(yaw_tgt)
-    rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt)
-    fwd = MotionControl.move(float(speed), 0.0)
+    rate = self._yaw_rate()
+    rot = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
+    fwd = MotionControl.move_forward(float(speed))
     duties = [
       self._clamp(fwd[0] + rot, -100.0, 100.0),
       self._clamp(fwd[1] + rot, -100.0, 100.0),
@@ -257,13 +283,11 @@ class MatchRunner(MatchIsr, MatchHunt):
     return dt
 
   def _write_vector(self, forward, lateral, rot):
+    """全向运动：forward=前后, lateral=左右(>0右移), rot=自旋(>0 CW)。"""
     if self._backoff_busy:
       return
-    fwd = MotionControl.move(float(forward), 0.0)
-    if lateral >= 0.0:
-      side = MotionControl.move(float(lateral), 90.0)
-    else:
-      side = MotionControl.move(float(-lateral), -90.0)
+    fwd = MotionControl.move_forward(float(forward)) if abs(forward) > 1e-6 else (0.0, 0.0, 0.0)
+    side = MotionControl.move_side(float(lateral)) if abs(lateral) > 1e-6 else (0.0, 0.0, 0.0)
     duties = [
       self._clamp(fwd[i] + side[i] + rot, -100.0, 100.0)
       for i in range(3)
@@ -286,28 +310,6 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._set_command(0.0, 0.0, d)
     self._arb.write(self.OWNER, [d, d, d])
 
-  def _write_orbit_front(self, spin, slip, forward=0.0):
-    """绕车头前方轴转：spin+slip 同号 → M1/M2 慢、M3 快（见 test_orbit_axis）。
-    满额 spin=40/slip=60 → 约 (20,20,80)。"""
-    if self._backoff_busy:
-      return
-    spin = float(spin)
-    slip = float(slip)
-    if slip >= 0.0:
-      side = MotionControl.move(slip, 90.0)
-    else:
-      side = MotionControl.move(-slip, -90.0)
-    if abs(forward) > 1e-6:
-      fwd = MotionControl.move(float(forward), 0.0)
-    else:
-      fwd = (0.0, 0.0, 0.0)
-    duties = [
-      self._clamp(fwd[i] + side[i] + spin, -100.0, 100.0)
-      for i in range(3)
-    ]
-    self._set_command(forward, slip, spin)
-    self._arb.write(self.OWNER, duties)
-
   def _hold_brake(self):
     self._set_command(0.0, 0.0, 0.0)
     self._arb.hold_brake(self.OWNER)
@@ -328,13 +330,10 @@ class MatchRunner(MatchIsr, MatchHunt):
       self._hold_brake()
       return False
     self._home_turn_ok = 0
-    # 近目标减速，避免 ±50 开环过冲乱转
-    s = float(self._cfg.drive_duty)
-    if abs(err) < 40.0:
-      s = s * 0.45
-    elif abs(err) < 80.0:
-      s = s * 0.7
-    s = self._cfg.yaw_actuation_sign * (s if err > 0 else -s)
+    # PD 控制：靠航向 PID（含D阻尼），不再使用开环分档
+    dt = self._control_dt()
+    rate = self._yaw_rate()
+    s = self._cfg.yaw_actuation_sign * self._hdg_pid.update(err, dt, rate)
     self._write_spin(s)
     return False
 

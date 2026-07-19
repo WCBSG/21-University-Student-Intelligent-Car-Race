@@ -37,15 +37,23 @@ class MotionControl:
   # ——————————————————————————————————————————————————————————
   #                         电机控制
   # ——————————————————————————————————————————————————————————
+  MIN_DUTY = 7  # 最低占空比(%) — 克服静摩擦，3轮需6-7%
+
   def setSpeed(self, duties):
     """
     设置三路电机占空比 [-100, 100]。
     正值=逆时针, 负值=顺时针, 0=停。
+    非零值自动提升到 MIN_DUTY 防堵转。
     先写三路第一脚，统一 dead-time 后再写第二脚（DRV8870 需要 ≥76us）。
     """
     second = []
     for i, d in enumerate(duties):
       d = max(-100, min(100, int(d)))
+      # 最低占空比：非零时至少 MIN_DUTY% 克服静摩擦
+      if 0 < d < self.MIN_DUTY:
+        d = self.MIN_DUTY
+      elif -self.MIN_DUTY < d < 0:
+        d = -self.MIN_DUTY
       ccw, cw = self._motors[i]
       if d > 0:
         ccw.duty_u16(self._pct_to_pwm(d))
@@ -74,6 +82,9 @@ class MotionControl:
   def _pct_to_pwm(pct):
     return int((100 - max(0, min(100, pct))) * 65535 / 100)
 
+  _FWD_K = 1.0 / math.sqrt(3.0)   # ≈0.5774  — cos(0)/√3
+  _SIDE_K = 1.0 / 3.0             # ≈0.3333  — sin(90)/3
+
   @staticmethod
   def move(speed, angle):
     """
@@ -86,6 +97,18 @@ class MotionControl:
     c = math.cos(r) / math.sqrt(3)
     s = math.sin(r) / 3
     return [speed*(s+c),speed*(s-c),speed*(-2*s)]
+
+  @staticmethod
+  def move_forward(speed):
+    """前向运动学，免 trig。speed>0=前进。"""
+    s = float(speed) * MotionControl._FWD_K
+    return [s, s, 0.0]
+
+  @staticmethod
+  def move_side(speed):
+    """横向运动学，免 trig。speed>0=右移。"""
+    s = float(speed) * MotionControl._SIDE_K
+    return [-s, -s, 2.0 * s]
 
 
 # =============================================================================
@@ -149,23 +172,26 @@ class MotorArbiter:
 # =============================================================================
 
 class HeadingPID:
-  """纯 P 航向控制器。"""
-  def __init__(self, kp=2.0, max_output=100.0, deadband=0.0, gains=None):
+  """PD 航向控制器。rate 为 signed yaw 变化率(°/s)，D 项抑振荡。"""
+  def __init__(self, kp=2.0, max_output=100.0, deadband=0.0, kd=0.0, gains=None):
     self._g = gains
     self.kp = kp
     self.max_output = max_output; self.deadband = deadband
+    self.kd = kd
 
   def _params(self):
     g = self._g
     if g is not None:
-      return g.kp, g.max_out, g.deadband
-    return self.kp, self.max_output, self.deadband
+      return (g.kp, g.max_out, g.deadband,
+              getattr(g, "kd", 0.0))
+    return self.kp, self.max_output, self.deadband, self.kd
 
-  def update(self, error, dt):
-    kp, mx, db = self._params()
+  def update(self, error, dt, rate=0.0):
+    """rate: signed yaw 变化率(°/s), 正=CCW。D 项=-kd*rate 抑过冲。"""
+    kp, mx, db, kd = self._params()
     if abs(error) < db:
       return 0.0
-    out = kp * error
+    out = kp * error - kd * rate
     if out > mx:
       out = mx
     elif out < -mx:
