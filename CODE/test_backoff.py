@@ -1,9 +1,13 @@
 """
-backoff_test.py — BACKOFF 后退+转180° 状态独立测试 (RETREAT / SPIN)
+test_backoff.py — BACKOFF 后退+自旋 独立测试 (RETREAT / SPIN)
+
+BACKOFF 逻辑:
+  RETREAT: 后退至离线 (最少 N ms) → SPIN
+  SPIN: 开环自旋 170°(≈180°) → HOME 或 FWD(HUNT)
 
 用法:
-  >>> import backoff_test
-  >>> go()              # 启动 BACKOFF
+  >>> import test_backoff
+  >>> go()              # 启动 BACKOFF, 自旋 180°
   >>> tick() / run(20)  # 单步/连续
   >>> mon()
 """
@@ -13,19 +17,33 @@ from motion import MotionControl, MotorArbiter, HeadingPID, wrap_deg
 from time import ticks_ms, ticks_diff, sleep_ms
 from smartcar import ticker
 
+# —— 热补丁 ——
+import math as _math
+def _patch_kinematics():
+  MotionControl.move_forward = staticmethod(lambda speed: (
+    lambda s = float(speed) * MotionControl._FWD_K: [s, -s, 0.0])())
+  MotionControl.move_side = staticmethod(lambda speed: (
+    lambda s = float(speed) * MotionControl._SIDE_K: [s, s, -2.0 * s])())
+  def _move(speed, angle):
+    r = _math.radians(-angle)
+    c = _math.cos(r) / _math.sqrt(3)
+    s = _math.sin(r) / 3
+    return [speed*(s+c), speed*(s-c), speed*(-2*s)]
+  MotionControl.move = staticmethod(_move)
+_patch_kinematics()
+
+# ── 全局 ──
 _imu = None; _tkr = None; _motors = None; _arb = None
 _OWNER = "BACKOFF_TEST"
 _current_sub = "IDLE"; _exit_to = ""
-_phase_ms = 0
-_drive_duty = 50.0; _retreat_min_ms = 800; _recover_timeout_ms = 9999
-_spin_deg = 170.0; _yaw_target = 0.0
-_yaw_actuation_sign = -1.0
-_hdg_pid = None; _spin_start_yaw = 0.0
+_phase_ms = 0; _drive_duty = 50.0; _retreat_min_ms = 800
+_spin_deg = 170.0; _yaw_target = 0.0; _spin_start_yaw = 0.0
+_yaw_actuation_sign = -1.0; _hdg_pid = None
 _bo_retreat = [0.0, 0.0, 0.0]
-_rate_yaw = 0.0; _rate_ms = 0; _prev_yaw = 0.0
+_ctrl_ms = 0; _rate_yaw = 0.0; _rate_ms = 0; _prev_yaw = 0.0
 
 _tick_n = 0
-def _tick(_):
+def _tick_imu(_):
   global _tick_n
   try: _imu.update(); _tick_n += 1
   except Exception: pass
@@ -45,49 +63,47 @@ def _control_dt():
   if dt <= 0.0 or dt > 0.5: dt = 0.05
   _ctrl_ms = now; return dt
 
-_ctrl_ms = 0
-
+# ── 初始化 ──
 def init():
-  global _imu, _tkr, _motors, _arb, _hdg_pid, _bo_retreat, _ctrl_ms
+  global _imu, _tkr, _motors, _arb, _hdg_pid, _bo_retreat
   print("[backoff] init IMU963...")
   _imu = ImuSensor(calibrate_samples=200, beta=0.05, model="963")
   _imu._gyro_scale = 1.0
-  _tkr = ticker(1); _tkr.capture_list(_imu.raw); _tkr.callback(_tick); _tkr.start(5)
+  _tkr = ticker(1); _tkr.capture_list(_imu.raw); _tkr.callback(_tick_imu); _tkr.start(5)
   t0 = ticks_ms()
   while not _imu.is_calibrated:
     sleep_ms(10)
     if ticks_diff(ticks_ms(), t0) > 10000: break
-  print("[backoff] OK yaw=%.2f" % _yaw() if _imu.is_calibrated else "[backoff] 标定超时")
+  print("[backoff] IMU OK yaw=%.2f" % _yaw() if _imu.is_calibrated else "[backoff] 标定超时")
   _motors = MotionControl(); _arb = MotorArbiter(_motors)
   _hdg_pid = HeadingPID(kp=1.1, max_output=50.0, deadband=1.0, kd=0.08)
   d = -_drive_duty; mv = MotionControl.move_forward(d)
   _bo_retreat = [mv[0], mv[1], mv[2]]
-  _ctrl_ms = ticks_ms()
-  print("[backoff] 就绪. go() / run(20)")
+  print("[backoff] 就绪. go() 后退+转180°")
 
-def go():
+# ── 入口 ──
+def go(hz=20):
   global _current_sub, _exit_to, _phase_ms, _yaw_target
   _arb.acquire(_OWNER)
   _yaw_target = wrap_deg(_yaw() + 180.0)
   _current_sub = "RETREAT"; _exit_to = ""
   _phase_ms = ticks_ms()
   _hdg_pid.reset()
-  print("[backoff] → RETREAT  target=%.1f° (180° turn)" % _yaw_target)
+  print("[backoff] → RETREAT  target=%.1f°" % _yaw_target)
+  _run_loop(hz)
 
 def stop():
   _arb.force_brake(); global _current_sub; _current_sub = "IDLE"
   print("[backoff] 停止")
 
+# ── 帧逻辑 ──
 def tick():
-  global _current_sub, _exit_to, _spin_start_yaw
+  global _current_sub, _exit_to, _spin_start_yaw, _phase_ms
   if _current_sub == "IDLE": return
-  now = ticks_ms()
-  elapsed = ticks_diff(now, _phase_ms)
+  now = ticks_ms(); elapsed = ticks_diff(now, _phase_ms)
 
   if _current_sub == "RETREAT":
-    # 一直后退直到离线或超时
     if elapsed >= _retreat_min_ms:
-      # 模拟离线 → 进 SPIN
       err = _yaw_err(_yaw_target)
       dt = _control_dt(); rate = _yaw_rate()
       s = _yaw_actuation_sign * _hdg_pid.update(err, dt, rate)
@@ -103,13 +119,11 @@ def tick():
     turned = abs(wrap_deg(_yaw() - _spin_start_yaw))
     if turned >= _spin_deg:
       _arb.hold_brake(_OWNER)
-      _exit_to = "HOME"  # 或 FWD
-      _current_sub = "IDLE"
-      print("[backoff] SPIN done (%.1f°) → %s" % (turned, _exit_to))
+      _exit_to = "HOME"; _current_sub = "IDLE"
+      print("[backoff] SPIN done %.1f° → %s" % (turned, _exit_to))
       return
-    if elapsed > _phase_ms + _recover_timeout_ms:
-      _exit_to = "HOME (spin timeout)"
-      _current_sub = "IDLE"; _arb.force_brake()
+    if elapsed > 2000:  # 自旋超时 2s
+      _exit_to = "HOME (timeout)"; _current_sub = "IDLE"; _arb.force_brake()
       print("[backoff] %s" % _exit_to)
       return
     err = _yaw_err(_yaw_target)
@@ -117,12 +131,13 @@ def tick():
     s = _yaw_actuation_sign * _hdg_pid.update(err, dt, rate)
     _arb.write(_OWNER, [s, s, s])
 
+# ── 监控 ──
 def mon():
   turned = abs(wrap_deg(_yaw() - _spin_start_yaw)) if _current_sub == "SPIN" else 0
-  print("[backoff] sub=%s  yaw=%.1f  target=%.1f  turned=%.1f/%.0f  exit=%s" % (
+  print("[backoff] sub=%s  yaw=%.1f  target=%.1f  turned=%.0f/%.0f°  exit=%s" % (
     _current_sub, _yaw(), _yaw_target, turned, _spin_deg, _exit_to or "-"))
 
-def run(hz=20):
+def _run_loop(hz=20):
   if _current_sub == "IDLE": print("[run] 请先 go()"); return
   dt = max(10, 1000 // hz); t_last = 0
   print("[run] %d Hz  sub=%s  Ctrl+C 停止" % (hz, _current_sub))
@@ -136,5 +151,7 @@ def run(hz=20):
       sleep_ms(dt)
   except KeyboardInterrupt: pass
   stop()
+
+def run(hz=20): _run_loop(hz)
 
 init()
