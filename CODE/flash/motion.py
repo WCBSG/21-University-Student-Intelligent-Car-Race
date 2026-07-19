@@ -14,13 +14,18 @@ class MotionControl:
     second = []
     if len(duties) != 3:
       raise ValueError("three motor duties required")
+    if use_min_duty:
+      min_abs = 101
+      for x in duties:
+        ax = abs(x)
+        if 0 < ax < min_abs:
+          min_abs = ax
+      if 0 < min_abs < self.MIN_DUTY:
+        scale = self.MIN_DUTY / min_abs
+        for j in range(len(duties)):
+          duties[j] = duties[j] * scale
     for i, d in enumerate(duties):
       d = max(-100, min(100, int(d)))
-      if use_min_duty:
-        if 0 < d < self.MIN_DUTY:
-          d = self.MIN_DUTY
-        elif -self.MIN_DUTY < d < 0:
-          d = -self.MIN_DUTY
       ccw, cw = self._motors[i]
       if d > 0:
         ccw.duty_u16(self._pct_to_pwm(d))

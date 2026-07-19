@@ -354,7 +354,7 @@ class MatchRunner(MatchIsr, MatchHunt):
     self._set_command(0.0, 0.0, d)
     duties = self._spin_duties
     duties[0] = duties[1] = duties[2] = d
-    self._arb.write(self.OWNER, duties, False)
+    self._arb.write(self.OWNER, duties, True)
   def _hold_brake(self):
     self._set_command(0.0, 0.0, 0.0)
     self._arb.hold_brake(self.OWNER)

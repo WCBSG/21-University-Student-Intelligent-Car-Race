@@ -175,7 +175,7 @@ tracking_db = 0.02               # 死区（归一化）
 # ═══════════════════════════════════════════════════════════════
 tracking_approach_speed = 55.0   # HUNT TRACK 前向接近速度（%）
 tracking_final_approach_speed = 35.0  # ALIGN CLOSE 最终接近速度（%）
-tracking_search_speed = 35.0     # 降低搜索角速度，避免跨目标反复回摆
+tracking_search_speed = 80.0     # 降低搜索角速度，避免跨目标反复回摆
 tracking_spin_rate_kp = 0.15     # 搜索角速度闭环增益
 tracking_spin_max_duty = 14.0    # 搜索旋转输出限幅
 tracking_spin_slew_duty_s = 80.0 # 搜索输出斜坡，禁止瞬间正反切换

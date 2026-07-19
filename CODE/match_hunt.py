@@ -132,6 +132,8 @@ class MatchHunt:
     self._bearing_pid.reset()
     self.phase = "ALIGN"
     self._sub = "TURN"
+    # ALIGN 阶段接受任意球类（0/1/2），避免 want 锁定单一类别导致丢目标后无法重捕获
+    self._match_allow = [0, 1, 2]
     info("MATCH", "→ ALIGN push_yaw=%.1f cur=%.1f" % (
       self._yaw_target, self._yaw()))
 
@@ -529,6 +531,11 @@ class MatchHunt:
     if sensors and sensors.get("new_frame"):
       self._vision_lost = 0
       self._align_sweep_active = False
+      # 跨类重捕获：更新锁定类别以修正 push_yaw 方向（保持 allow 开放）
+      tgt_cls = int(target[0])
+      if tgt_cls != self._active_cls:
+        self._active_cls = tgt_cls
+        self._filter_class = tgt_cls
 
     cx = float(target[6])
     y2 = float(target[9])
