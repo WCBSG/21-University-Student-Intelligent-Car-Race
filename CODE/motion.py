@@ -90,7 +90,7 @@ class MotionControl:
     """
     全向轮运动学逆解。
     speed: 合成速度大小
-    angle: 移动方向角度 (deg), 0 = 机器人前方
+    angle: 移动方向角度 (deg), 0 = 机器人前方 , 逆时针增加度数
     返回 [M1, M2, M3] 需要的占空比。
     """
     r = math.radians(-angle)
@@ -102,13 +102,13 @@ class MotionControl:
   def move_forward(speed):
     """前向运动学，免 trig。speed>0=前进。"""
     s = float(speed) * MotionControl._FWD_K
-    return [s, s, 0.0]
+    return [s, -s, 0.0]
 
   @staticmethod
   def move_side(speed):
-    """横向运动学，免 trig。speed>0=右移。"""
+    """横向运动学，免 trig。speed>0=右移(=move(speed,-90))。"""
     s = float(speed) * MotionControl._SIDE_K
-    return [-s, -s, 2.0 * s]
+    return [s, s, -2.0 * s]
 
 
 # =============================================================================

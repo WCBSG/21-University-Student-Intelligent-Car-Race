@@ -35,14 +35,14 @@ SKIP_DIR_NAMES = {".flash", "__pycache__", ".git", u"例程", u"[例程]Rt1021�
 SKIP_FILE_NAMES = {
     "build_flash.py",
     # 测试/调试脚本 — 不上车
-    "imu_test.py",
     "imu_test_params.txt",
-    "align_test.py",
-    "leave_test.py",
-    "hunt_test.py",
-    "push_test.py",
-    "backoff_test.py",
-    "home_test.py",
+    "test_imu.py",
+    "test_align.py",
+    "test_leave.py",
+    "test_hunt.py",
+    "test_push.py",
+    "test_backoff.py",
+    "test_home.py",
     "log.txt",
 }
 
