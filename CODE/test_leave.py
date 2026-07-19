@@ -196,10 +196,11 @@ def init(use_cam=True, use_tcs=True):
       from camera import CameraRx
       _cam = CameraRx(UART(5, baudrate=460800), timeout_ms=5000)
       # 握手
-      for i in range(2):
-        if _cam.handshake(retries=1, retry_ms=80):
+      _cam.flush()
+      for i in range(5):
+        if _cam.handshake(retries=4, retry_ms=80):
           _cam.set_ready()
-          print("[leave] CAM OK")
+          print("[leave] CAM OK (try %d)" % (i+1))
           break
         sleep_ms(100)
       if not _cam.is_ready:

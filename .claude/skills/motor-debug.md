@@ -62,8 +62,31 @@ def move_side(speed):      # 免 trig
     return [-s, -s, 2.0 * s]
 ```
 
+## 已验证的运动学
+
+**极性**：`[d,d,d]` 正占空比 → CW（yaw↓）。`yaw_actuation_sign = -1`。
+
+**轮序**：轮1 物理接线方向与运动学模型相反，需取反。`move()` 通用公式本身正确，但 `move_forward`/`move_side` 是手写 bug：
+
+```python
+# move() — 正确的通用运动学（已验证）
+def move(speed, angle):
+    r = math.radians(-angle)
+    c = math.cos(r) / math.sqrt(3)
+    s = math.sin(r) / 3
+    return [speed*(s+c), speed*(s-c), speed*(-2*s)]
+
+# move_forward(s)  = move(s, 0)    = [s, -s, 0]
+# move_side(s)     = move(s, -90)  = [s, s, -2s]  (右移)
+# move(s, 90)                     = [-s, -s, 2s]  (左移)
+```
+
+`move_forward` 原来手写 `[s, s, 0]` → 车横着跑。修复为 `[s, -s, 0]`。
+`move_side` 原来手写 `[-s, -s, 2s]` → 左移。修复为 `[s, s, -2s]` = 右移。
+
 ## 常见问题
 
 - 低速抖动不转 → 低于最低占空比 → 全局提升到 7%
 - PD 收敛后振荡 → 死区 `abs(out) < 5 → 0` 太宽，与最低占空比冲突
 - settle 阶段过冲 → 容忍区内不用 0，用 `-kd * dps_est` 制动
+- 车横着跑 → 运动学公式错误 → 用 `move(speed, angle)` 验证

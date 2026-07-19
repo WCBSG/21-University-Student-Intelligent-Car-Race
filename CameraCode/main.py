@@ -221,31 +221,29 @@ def main():
     # === 检测循环 ===
     while True:
       now = time.ticks_ms()
-      # 仅有数据时查重握手，避免每帧空等
-      if uart.any() >= 4:
-        cmd, _ = recv_frame(uart, timeout_ms=1)
-        if cmd == 0x01:
-          print("[CAM] Re-handshake")
-          send_frame(uart, 0x02, status)
-          t_rehs = time.ticks_ms()
-          timed_out = False
-          while not timed_out:
-            cmd2, _ = recv_frame(uart, timeout_ms=100)
-            if cmd2 == 0x01:
-              send_frame(uart, 0x02, status)
-            elif cmd2 == 0x03:
-              print("[CAM] Re-handshake done")
-              break
-            if time.ticks_diff(time.ticks_ms(), t_rehs) > 5000:
-              print("[CAM] Re-handshake timeout")
-              timed_out = True
-            time.sleep_ms(10)
-          if timed_out:
+      # MCU 热重启时发来数据 → 回 0x02 重握手，不解析帧省算力
+      if uart.any():
+        while uart.any():
+          uart.read(uart.any())
+        print("[CAM] Re-handshake (got data)")
+        send_frame(uart, 0x02, status)
+        t_rehs = time.ticks_ms()
+        timed_out = False
+        while not timed_out:
+          cmd3, _ = recv_frame(uart, timeout_ms=100)
+          if cmd3 == 0x01:
+            send_frame(uart, 0x02, status)
+          elif cmd3 == 0x03:
+            print("[CAM] Re-handshake done")
             break
-          while uart.any():
-            uart.read(uart.any())
-          last_gc_ms = time.ticks_ms()
-          continue
+          if time.ticks_diff(time.ticks_ms(), t_rehs) > 5000:
+            print("[CAM] Re-handshake timeout")
+            timed_out = True
+          time.sleep_ms(10)
+        if timed_out:
+          break
+        last_gc_ms = time.ticks_ms()
+        continue
 
       img = sensor.snapshot()
       objects = []
